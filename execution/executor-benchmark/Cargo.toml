@@ -12,7 +12,7 @@ edition = "2018"
 [dependencies]
 itertools = { version = "0.10.0", default-features = false }
 rand = "0.8.3"
-rayon = "1.5.0"
+rayon = "1.5.1"
 structopt = "0.3.21"
 
 executor = { path = "../executor" }
