@@ -28,7 +28,7 @@ clap = "2.33.3"
 log = "0.4.14"
 rayon = "1.5.0"
 sha2 = "0.9.3"
-walkdir = "2.3.1"
+walkdir = "2.3.2"
 
 [dev-dependencies]
 datatest-stable = { path = "../../common/datatest-stable" }

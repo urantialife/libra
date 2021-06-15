@@ -15,7 +15,7 @@ regex = "1.4.3"
 structopt = "0.3.21"
 difference = "2.0.0"
 petgraph = "0.5.1"
-walkdir = "2.3.1"
+walkdir = "2.3.2"
 tempfile = "3.2.0"
 
 fallible = { path = "../../common/fallible" }

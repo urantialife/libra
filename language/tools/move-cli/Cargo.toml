@@ -34,7 +34,7 @@ resource-viewer = { path = "../resource-viewer" }
 diem-framework = { path = "../../diem-framework" }
 vm = { path = "../../vm" }
 vm-genesis = { path = "../vm-genesis" }
-walkdir = "2.3.1"
+walkdir = "2.3.2"
 
 [dev-dependencies]
 datatest-stable = { path = "../../../common/datatest-stable" }
