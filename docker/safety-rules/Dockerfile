@@ -1,43 +1,40 @@
-FROM debian:buster-20200803@sha256:a44ab0cca6cd9411032d180bc396f19bc98f71972d2398d50460145cab81c5ab AS toolchain
+FROM debian:buster-20210208@sha256:1092695e843ad975267131f27a2b523128c4e03d2d96574bbdd7cf949ed51475 AS toolchain
 
 # To use http/https proxy while building, use:
 # docker build --build-arg https_proxy=http://fwdproxy:8080 --build-arg http_proxy=http://fwdproxy:8080
 
-RUN apt-get update && apt-get install -y cmake curl clang git
+RUN apt-get update && apt-get install -y cmake curl clang git pkg-config libssl-dev
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
 ENV PATH "$PATH:/root/.cargo/bin"
 
-WORKDIR /libra
-COPY rust-toolchain /libra/rust-toolchain
+WORKDIR /diem
+COPY rust-toolchain /diem/rust-toolchain
 RUN rustup install $(cat rust-toolchain)
 
-COPY cargo-toolchain /libra/cargo-toolchain
+COPY cargo-toolchain /diem/cargo-toolchain
 RUN rustup install $(cat cargo-toolchain)
 
 FROM toolchain AS builder
 
 ARG ENABLE_FAILPOINTS
-COPY . /libra
+COPY . /diem
 
 RUN ./docker/build-common.sh
 
 ### Production Image ###
-FROM debian:buster-20200803@sha256:a44ab0cca6cd9411032d180bc396f19bc98f71972d2398d50460145cab81c5ab AS prod
+FROM debian:buster-20210208@sha256:1092695e843ad975267131f27a2b523128c4e03d2d96574bbdd7cf949ed51475 AS prod
 
-RUN addgroup --system --gid 6180 libra && adduser --system --ingroup libra --no-create-home --uid 6180 libra
+RUN apt-get update && apt-get install -y libssl1.1 && apt-get clean && rm -r /var/lib/apt/lists/*
 
-RUN mkdir -p /opt/libra/bin /opt/libra/etc /opt/libra/data
+RUN addgroup --system --gid 6180 diem && adduser --system --ingroup diem --no-create-home --uid 6180 diem
 
-COPY docker/safety-rules/key-manager.sh /
-COPY docker/safety-rules/safety-rules.sh /
+RUN mkdir -p /opt/diem/bin /opt/diem/etc /opt/diem/data
 
-COPY --from=builder /libra/target/release/config-builder /opt/libra/bin
-COPY --from=builder /libra/target/release/libra-key-manager /opt/libra/bin
-COPY --from=builder /libra/target/release/safety-rules /opt/libra/bin
+COPY --from=builder /diem/target/release/diem-key-manager /opt/diem/bin
+COPY --from=builder /diem/target/release/safety-rules /opt/diem/bin
 
 ENV RUST_BACKTRACE 1
-CMD /safety-rules.sh
 
 ARG BUILD_DATE
 ARG GIT_REV

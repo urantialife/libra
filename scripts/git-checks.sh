@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (c) The Libra Core Contributors
+# Copyright (c) The Diem Core Contributors
 # SPDX-License-Identifier: Apache-2.0
 
 set -e
@@ -56,7 +56,7 @@ for rev in $(git rev-list $oldrev..$newrev); do
 		--diff-filter=AR)
 
 	# Block commits with filenames outside normal ASCII
-	badnames=$(grep '\\\|[`{}|~]' <<< "$names") || true
+	badnames=$(grep '\\\|[`{}|~:]' <<< "$names") || true
 	#                ^^ find anything with a backslash in the name
 	#                  ^^ or...
 	#                    ^^^^^^^ any of these funky chars

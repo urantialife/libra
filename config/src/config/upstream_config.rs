@@ -1,9 +1,10 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::network_id::{NetworkId, NodeNetworkId};
-use libra_types::PeerId;
+use diem_types::PeerId;
 use serde::{Deserialize, Serialize};
+use short_hex_str::AsShortHexStr;
 use std::fmt;
 
 /// If a node considers a network 'upstream', the node will broadcast transactions (via mempool) to and

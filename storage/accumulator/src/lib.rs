@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
@@ -103,9 +103,12 @@
 //! |  ...  |   ...     |
 //! ```
 
+#[cfg(any(test, feature = "fuzzing"))]
+pub mod test_helpers;
+
 use anyhow::{ensure, format_err, Result};
-use libra_crypto::hash::{CryptoHash, CryptoHasher, HashValue, ACCUMULATOR_PLACEHOLDER_HASH};
-use libra_types::proof::{
+use diem_crypto::hash::{CryptoHash, CryptoHasher, HashValue, ACCUMULATOR_PLACEHOLDER_HASH};
+use diem_types::proof::{
     definition::{LeafCount, MAX_ACCUMULATOR_PROOF_DEPTH},
     position::{FrozenSubTreeIterator, FrozenSubtreeSiblingIterator, Position},
     AccumulatorConsistencyProof, AccumulatorProof, AccumulatorRangeProof, MerkleTreeInternalNode,
@@ -148,7 +151,7 @@ where
     /// `num_leaves` leaves in total. Siblings are read via `reader` (or generated dynamically
     /// if they are non-frozen).
     ///
-    /// See [`libra_types::proof::AccumulatorProof`] for proof format.
+    /// See [`diem_types::proof::AccumulatorProof`] for proof format.
     pub fn get_proof(
         reader: &R,
         num_leaves: LeafCount,
@@ -159,7 +162,7 @@ where
 
     /// Gets a proof that shows the full accumulator is consistent with a smaller accumulator.
     ///
-    /// See [`libra_types::proof::AccumulatorConsistencyProof`] for proof format.
+    /// See [`diem_types::proof::AccumulatorConsistencyProof`] for proof format.
     pub fn get_consistency_proof(
         reader: &R,
         full_acc_leaves: LeafCount,
@@ -171,7 +174,7 @@ where
 
     /// Gets a proof that shows a range of leaves are part of the accumulator.
     ///
-    /// See [`libra_types::proof::AccumulatorRangeProof`] for proof format.
+    /// See [`diem_types::proof::AccumulatorRangeProof`] for proof format.
     pub fn get_range_proof(
         reader: &R,
         full_acc_leaves: LeafCount,
@@ -209,6 +212,11 @@ where
     /// ```
     pub fn get_frozen_subtree_hashes(reader: &R, num_leaves: LeafCount) -> Result<Vec<HashValue>> {
         MerkleAccumulatorView::<R, H>::new(reader, num_leaves).get_frozen_subtree_hashes()
+    }
+
+    /// Get root hash at a specific version (hence num_leaves).
+    pub fn get_root_hash(reader: &R, num_leaves: LeafCount) -> Result<HashValue> {
+        MerkleAccumulatorView::<R, H>::new(reader, num_leaves).get_root_hash()
     }
 }
 
@@ -343,6 +351,10 @@ where
         positions.iter().map(|p| self.get_hash(*p)).collect()
     }
 
+    fn get_root_hash(&self) -> Result<HashValue> {
+        self.get_hash(Position::root_from_leaf_count(self.num_leaves))
+    }
+
     /// implementation for pub interface `MerkleAccumulator::get_proof`
     fn get_proof(&self, leaf_index: u64) -> Result<AccumulatorProof<H>> {
         ensure!(
@@ -363,8 +375,8 @@ where
     ) -> Result<AccumulatorConsistencyProof> {
         ensure!(
             sub_acc_leaves <= self.num_leaves,
-            "The other accumulator is bigger than this one. self.num_leaves: {}. \
-             sub_acc_leaves: {}.",
+            "Can't get accumulator consistency proof for a version newer than the local version. \
+            Local next version: {}, asked next version: {}",
             self.num_leaves,
             sub_acc_leaves,
         );

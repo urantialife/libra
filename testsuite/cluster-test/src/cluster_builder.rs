@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
@@ -17,26 +17,25 @@ use crate::{
     },
 };
 use anyhow::{format_err, Result};
+use diem_logger::info;
 use futures::future::try_join_all;
-use libra_logger::info;
 use std::{fs::File, io::Write, path::Path};
 use structopt::StructOpt;
 
 use consensus_types::safety_data::SafetyData;
-use libra_genesis_tool::layout::Layout;
-use libra_global_constants::{
-    CONSENSUS_KEY, EXECUTION_KEY, FULLNODE_NETWORK_KEY, LIBRA_ROOT_KEY, OPERATOR_KEY, OWNER_KEY,
-    SAFETY_DATA, TREASURY_COMPLIANCE_KEY, VALIDATOR_NETWORK_ADDRESS_KEYS, VALIDATOR_NETWORK_KEY,
-    WAYPOINT,
+use diem_genesis_tool::layout::Layout;
+use diem_global_constants::{
+    CONSENSUS_KEY, DIEM_ROOT_KEY, EXECUTION_KEY, FULLNODE_NETWORK_KEY, GENESIS_WAYPOINT,
+    OPERATOR_KEY, OWNER_KEY, SAFETY_DATA, TREASURY_COMPLIANCE_KEY, VALIDATOR_NETWORK_ADDRESS_KEYS,
+    VALIDATOR_NETWORK_KEY, WAYPOINT,
 };
-use libra_network_address::NetworkAddress;
-use libra_secure_storage::{CryptoStorage, KVStorage, Storage, VaultStorage};
-use libra_types::{chain_id::ChainId, waypoint::Waypoint};
+use diem_secure_storage::{CryptoStorage, KVStorage, Storage, VaultStorage};
+use diem_types::{chain_id::ChainId, network_address::NetworkAddress, waypoint::Waypoint};
 use std::str::FromStr;
 
 const VAULT_TOKEN: &str = "root";
 const VAULT_PORT: u32 = 8200;
-const LIBRA_ROOT_NS: &str = "val-0";
+const DIEM_ROOT_NS: &str = "val-0";
 const VAULT_BACKEND: &str = "vault";
 const GENESIS_PATH: &str = "/tmp/genesis.blob";
 
@@ -250,7 +249,7 @@ impl ClusterBuilder {
         if !vault_nodes.is_empty() {
             info!("Generating genesis with management tool.");
             try_join_all(vault_nodes.iter().enumerate().map(|(i, node)| async move {
-                libra_retrier::retry_async(libra_retrier::fixed_retry_strategy(5000, 15), || {
+                diem_retrier::retry_async(diem_retrier::fixed_retry_strategy(5000, 15), || {
                     Box::pin(async move { self.initialize_vault(i as u32, node).await })
                 })
                 .await
@@ -369,15 +368,18 @@ impl ClusterBuilder {
                 Some(pod_name.clone()),
                 None,
                 None,
+                true,
+                None,
+                None,
             ));
             if validator_index == 0 {
-                vault_storage.create_key(LIBRA_ROOT_KEY).map_err(|e| {
-                    format_err!("Failed to create {}__{} : {}", pod_name, LIBRA_ROOT_KEY, e)
+                vault_storage.create_key(DIEM_ROOT_KEY).map_err(|e| {
+                    format_err!("Failed to create {}__{} : {}", pod_name, DIEM_ROOT_KEY, e)
                 })?;
                 let key = vault_storage
-                    .export_private_key(LIBRA_ROOT_KEY)
+                    .export_private_key(DIEM_ROOT_KEY)
                     .map_err(|e| {
-                        format_err!("Failed to export {}__{} : {}", pod_name, LIBRA_ROOT_KEY, e)
+                        format_err!("Failed to export {}__{} : {}", pod_name, DIEM_ROOT_KEY, e)
                     })?;
                 vault_storage
                     .import_private_key(TREASURY_COMPLIANCE_KEY, key)
@@ -409,7 +411,10 @@ impl ClusterBuilder {
             vault_storage
                 .set(WAYPOINT, Waypoint::default())
                 .map_err(|e| format_err!("Failed to create {}/{} : {}", pod_name, WAYPOINT, e))?;
-            libra_network_address_encryption::Encryptor::new(vault_storage)
+            vault_storage
+                .set(GENESIS_WAYPOINT, Waypoint::default())
+                .map_err(|e| format_err!("Failed to create {}/{} : {}", pod_name, WAYPOINT, e))?;
+            diem_network_address_encryption::Encryptor::new(vault_storage)
                 .initialize_for_testing()
                 .map_err(|e| {
                     format_err!(
@@ -437,8 +442,8 @@ impl ClusterBuilder {
         let layout = Layout {
             owners: owners.clone(),
             operators: owners,
-            libra_root: LIBRA_ROOT_NS.to_string(),
-            treasury_compliance: LIBRA_ROOT_NS.to_string(),
+            diem_root: DIEM_ROOT_NS.to_string(),
+            treasury_compliance: DIEM_ROOT_NS.to_string(),
         };
         let layout_path = "/tmp/layout.yaml";
         write!(
@@ -467,25 +472,25 @@ impl ClusterBuilder {
             .await
             .map_err(|e| format_err!("Failed to set_layout : {}", e))?;
         genesis_helper
-            .libra_root_key(
+            .diem_root_key(
                 VAULT_BACKEND,
                 format!("http://{}:{}", vault_nodes[0].internal_ip, VAULT_PORT).as_str(),
                 token_path,
-                LIBRA_ROOT_NS,
-                LIBRA_ROOT_NS,
+                DIEM_ROOT_NS,
+                DIEM_ROOT_NS,
             )
             .await
-            .map_err(|e| format_err!("Failed to libra_root_key : {}", e))?;
+            .map_err(|e| format_err!("Failed to diem_root_key : {}", e))?;
         genesis_helper
             .treasury_compliance_key(
                 VAULT_BACKEND,
                 format!("http://{}:{}", vault_nodes[0].internal_ip, VAULT_PORT).as_str(),
                 token_path,
-                LIBRA_ROOT_NS,
-                LIBRA_ROOT_NS,
+                DIEM_ROOT_NS,
+                DIEM_ROOT_NS,
             )
             .await
-            .map_err(|e| format_err!("Failed to libra_root_key : {}", e))?;
+            .map_err(|e| format_err!("Failed to diem_root_key : {}", e))?;
 
         for (i, node) in vault_nodes.iter().enumerate() {
             let pod_name = validator_pod_name(i as u32);
@@ -521,7 +526,7 @@ impl ClusterBuilder {
                         format!("/ip4/{}/tcp/{}", validator_nodes[i].internal_ip, 6180).as_str(),
                     )
                     .expect("Failed to parse network address"),
-                    NetworkAddress::from_str(format!("/ip4/{}/tcp/{}", fullnode_ip, 6180).as_str())
+                    NetworkAddress::from_str(format!("/ip4/{}/tcp/{}", fullnode_ip, 6182).as_str())
                         .expect("Failed to parse network address"),
                     ChainId::test(),
                     VAULT_BACKEND,
@@ -565,7 +570,7 @@ impl ClusterBuilder {
         }
         genesis_helper
             .extract_private_key(
-                format!("{}__{}", LIBRA_ROOT_NS, LIBRA_ROOT_KEY).as_str(),
+                format!("{}__{}", DIEM_ROOT_NS, DIEM_ROOT_KEY).as_str(),
                 "/tmp/mint.key",
                 VAULT_BACKEND,
                 format!("http://{}:{}", vault_nodes[0].internal_ip, VAULT_PORT).as_str(),

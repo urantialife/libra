@@ -1,9 +1,9 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
     parser::ast::{
-        BinOp, ConstantName, Field, FunctionName, FunctionVisibility, Kind, ModuleIdent,
+        BinOp, ConstantName, Field, FunctionName, FunctionVisibility, Kind, ModuleIdent, QuantKind,
         ResourceLoc, SpecApplyPattern, SpecBlockTarget, SpecConditionKind, StructName, UnaryOp,
         Var,
     },
@@ -19,7 +19,7 @@ use std::{
 // Program
 //**************************************************************************************************
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Program {
     pub modules: UniqueMap<ModuleIdent, ModuleDefinition>,
     pub scripts: BTreeMap<String, Script>,
@@ -29,7 +29,7 @@ pub struct Program {
 // Scripts
 //**************************************************************************************************
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Script {
     pub loc: Loc,
     pub constants: UniqueMap<ConstantName, Constant>,
@@ -42,10 +42,11 @@ pub struct Script {
 // Modules
 //**************************************************************************************************
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ModuleDefinition {
     pub loc: Loc,
     pub is_source_module: bool,
+    pub friends: UniqueMap<ModuleIdent, Loc>,
     pub structs: UniqueMap<StructName, StructDefinition>,
     pub functions: UniqueMap<FunctionName, Function>,
     pub constants: UniqueMap<ConstantName, Constant>,
@@ -58,7 +59,7 @@ pub struct ModuleDefinition {
 
 pub type Fields<T> = UniqueMap<Field, (usize, T)>;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StructDefinition {
     pub loc: Loc,
     pub resource_opt: ResourceLoc,
@@ -66,7 +67,7 @@ pub struct StructDefinition {
     pub fields: StructFields,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum StructFields {
     Defined(Fields<Type>),
     Native(Loc),
@@ -76,15 +77,14 @@ pub enum StructFields {
 // Functions
 //**************************************************************************************************
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub struct FunctionSignature {
     pub type_parameters: Vec<(Name, Kind)>,
     pub parameters: Vec<(Var, Type)>,
     pub return_type: Type,
 }
 
-#[derive(PartialEq, Debug)]
-
+#[derive(PartialEq, Clone, Debug)]
 pub enum FunctionBody_ {
     Defined(Sequence),
     Native,
@@ -94,7 +94,7 @@ pub type FunctionBody = Spanned<FunctionBody_>;
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct SpecId(usize);
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub struct Function {
     pub loc: Loc,
     pub visibility: FunctionVisibility,
@@ -108,7 +108,7 @@ pub struct Function {
 // Constants
 //**************************************************************************************************
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub struct Constant {
     pub loc: Loc,
     pub signature: Type,
@@ -119,14 +119,14 @@ pub struct Constant {
 // Specification Blocks
 //**************************************************************************************************
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SpecBlock_ {
     pub target: SpecBlockTarget,
     pub members: Vec<SpecBlockMember>,
 }
 pub type SpecBlock = Spanned<SpecBlock_>;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum SpecBlockMember_ {
     Condition {
@@ -152,6 +152,7 @@ pub enum SpecBlockMember_ {
         def: Exp,
     },
     Include {
+        properties: Vec<PragmaProperty>,
         exp: Exp,
     },
     Apply {
@@ -165,12 +166,18 @@ pub enum SpecBlockMember_ {
 }
 pub type SpecBlockMember = Spanned<SpecBlockMember_>;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PragmaProperty_ {
     pub name: Name,
-    pub value: Option<Value>,
+    pub value: Option<PragmaValue>,
 }
 pub type PragmaProperty = Spanned<PragmaProperty_>;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PragmaValue {
+    Literal(Value),
+    Ident(ModuleAccess),
+}
 
 //**************************************************************************************************
 // Types
@@ -183,7 +190,7 @@ pub enum ModuleAccess_ {
 }
 pub type ModuleAccess = Spanned<ModuleAccess_>;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum Type_ {
     Unit,
@@ -199,7 +206,7 @@ pub type Type = Spanned<Type_>;
 // Expressions
 //**************************************************************************************************
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum LValue_ {
     Var(ModuleAccess, Option<Vec<Type>>),
     Unpack(ModuleAccess, Option<Vec<Type>>, Fields<LValue>),
@@ -208,7 +215,12 @@ pub type LValue = Spanned<LValue_>;
 pub type LValueList_ = Vec<LValue>;
 pub type LValueList = Spanned<LValueList_>;
 
-#[derive(Debug, PartialEq)]
+pub type LValueWithRange_ = (LValue, Exp);
+pub type LValueWithRange = Spanned<LValueWithRange_>;
+pub type LValueWithRangeList_ = Vec<LValueWithRange>;
+pub type LValueWithRangeList = Spanned<LValueWithRangeList_>;
+
+#[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum ExpDotted_ {
     Exp(Exp),
@@ -233,7 +245,7 @@ pub enum Value_ {
 }
 pub type Value = Spanned<Value_>;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum Exp_ {
     Value(Value),
@@ -250,6 +262,13 @@ pub enum Exp_ {
     Loop(Box<Exp>),
     Block(Sequence),
     Lambda(LValueList, Box<Exp>), // spec only
+    Quant(
+        QuantKind,
+        LValueWithRangeList,
+        Vec<Vec<Exp>>,
+        Option<Box<Exp>>,
+        Box<Exp>,
+    ), // spec only
 
     Assign(LValueList, Box<Exp>),
     FieldMutate(Box<ExpDotted>, Box<Exp>),
@@ -265,7 +284,9 @@ pub enum Exp_ {
     BinopExp(Box<Exp>, BinOp, Box<Exp>),
 
     ExpList(Vec<Exp>),
-    Unit { trailing: bool },
+    Unit {
+        trailing: bool,
+    },
 
     Borrow(bool, Box<Exp>),
     ExpDotted(Box<ExpDotted>),
@@ -281,7 +302,7 @@ pub enum Exp_ {
 pub type Exp = Spanned<Exp_>;
 
 pub type Sequence = VecDeque<SequenceItem>;
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SequenceItem_ {
     Seq(Exp),
     Declare(LValueList, Option<Type>),
@@ -356,7 +377,7 @@ impl fmt::Display for SpecId {
 impl AstDebug for Program {
     fn ast_debug(&self, w: &mut AstWriter) {
         let Program { modules, scripts } = self;
-        for (m, mdef) in modules {
+        for (m, mdef) in modules.key_cloned_iter() {
             w.write(&format!("module {}", m));
             w.block(|w| mdef.ast_debug(w));
             w.new_line();
@@ -379,7 +400,7 @@ impl AstDebug for Script {
             function,
             specs,
         } = self;
-        for cdef in constants {
+        for cdef in constants.key_cloned_iter() {
             cdef.ast_debug(w);
             w.new_line();
         }
@@ -396,6 +417,7 @@ impl AstDebug for ModuleDefinition {
         let ModuleDefinition {
             loc: _loc,
             is_source_module,
+            friends,
             structs,
             functions,
             constants,
@@ -406,15 +428,19 @@ impl AstDebug for ModuleDefinition {
         } else {
             "library module"
         });
-        for sdef in structs {
+        for (mident, _loc) in friends.key_cloned_iter() {
+            w.write(&format!("friend {};", mident));
+            w.new_line();
+        }
+        for sdef in structs.key_cloned_iter() {
             sdef.ast_debug(w);
             w.new_line();
         }
-        for cdef in constants {
+        for cdef in constants.key_cloned_iter() {
             cdef.ast_debug(w);
             w.new_line();
         }
-        for fdef in functions {
+        for fdef in functions.key_cloned_iter() {
             fdef.ast_debug(w);
             w.new_line();
         }
@@ -446,7 +472,7 @@ impl AstDebug for (StructName, &StructDefinition) {
         type_parameters.ast_debug(w);
         if let StructFields::Defined(fields) = fields {
             w.block(|w| {
-                w.list(fields, ",", |w, (f, idx_st)| {
+                w.list(fields, ",", |w, (_, f, idx_st)| {
                     let (idx, st) = idx_st;
                     w.write(&format!("{}#{}: ", idx, f));
                     st.ast_debug(w);
@@ -521,7 +547,7 @@ impl AstDebug for SpecBlockMember_ {
                 w.write(&format!("let {} = ", name));
                 def.ast_debug(w);
             }
-            SpecBlockMember_::Include { exp } => {
+            SpecBlockMember_::Include { properties: _, exp } => {
                 w.write("include ");
                 exp.ast_debug(w);
             }
@@ -561,7 +587,10 @@ impl AstDebug for PragmaProperty_ {
         w.write(&self.name.value);
         if let Some(value) = &self.value {
             w.write(" = ");
-            value.ast_debug(w);
+            match value {
+                PragmaValue::Literal(l) => l.ast_debug(w),
+                PragmaValue::Ident(i) => i.ast_debug(w),
+            }
         }
     }
 }
@@ -764,7 +793,7 @@ impl AstDebug for Exp_ {
                     w.write(">");
                 }
                 w.write("{");
-                w.comma(fields, |w, (f, idx_e)| {
+                w.comma(fields, |w, (_, f, idx_e)| {
                     let (idx, e) = idx_e;
                     w.write(&format!("{}#{}: ", idx, f));
                     e.ast_debug(w);
@@ -794,6 +823,18 @@ impl AstDebug for Exp_ {
                 w.write("fun ");
                 bs.ast_debug(w);
                 w.write(" ");
+                e.ast_debug(w);
+            }
+            E::Quant(kind, sp!(_, rs), trs, c_opt, e) => {
+                kind.ast_debug(w);
+                w.write(" ");
+                rs.ast_debug(w);
+                trs.ast_debug(w);
+                if let Some(c) = c_opt {
+                    w.write(" where ");
+                    c.ast_debug(w);
+                }
+                w.write(" : ");
                 e.ast_debug(w);
             }
             E::ExpList(es) => {
@@ -932,13 +973,44 @@ impl AstDebug for LValue_ {
                     w.write(">");
                 }
                 w.write("{");
-                w.comma(fields, |w, (f, idx_b)| {
+                w.comma(fields, |w, (_, f, idx_b)| {
                     let (idx, b) = idx_b;
                     w.write(&format!("{}#{}: ", idx, f));
                     b.ast_debug(w);
                 });
                 w.write("}");
             }
+        }
+    }
+}
+
+impl AstDebug for Vec<LValueWithRange> {
+    fn ast_debug(&self, w: &mut AstWriter) {
+        let parens = self.len() != 1;
+        if parens {
+            w.write("(");
+        }
+        w.comma(self, |w, b| b.ast_debug(w));
+        if parens {
+            w.write(")");
+        }
+    }
+}
+
+impl AstDebug for (LValue, Exp) {
+    fn ast_debug(&self, w: &mut AstWriter) {
+        self.0.ast_debug(w);
+        w.write(" in ");
+        self.1.ast_debug(w);
+    }
+}
+
+impl AstDebug for Vec<Vec<Exp>> {
+    fn ast_debug(&self, w: &mut AstWriter) {
+        for trigger in self {
+            w.write("{");
+            w.comma(trigger, |w, b| b.ast_debug(w));
+            w.write("}");
         }
     }
 }

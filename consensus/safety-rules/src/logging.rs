@@ -1,10 +1,10 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::Error;
-use consensus_types::common::Round;
-use libra_logger::Schema;
-use libra_types::waypoint::Waypoint;
+use consensus_types::common::{Author, Round};
+use diem_logger::Schema;
+use diem_types::waypoint::Waypoint;
 use serde::Serialize;
 
 #[derive(Schema)]
@@ -18,6 +18,7 @@ pub struct SafetyLogSchema<'a> {
     #[schema(display)]
     error: Option<&'a Error>,
     waypoint: Option<Waypoint>,
+    author: Option<Author>,
 }
 
 impl<'a> SafetyLogSchema<'a> {
@@ -31,6 +32,7 @@ impl<'a> SafetyLogSchema<'a> {
             epoch: None,
             error: None,
             waypoint: None,
+            author: None,
         }
     }
 }
@@ -47,6 +49,7 @@ pub enum LogEntry {
     PreferredRound,
     SignProposal,
     SignTimeout,
+    State,
     Waypoint,
 }
 
@@ -62,6 +65,7 @@ impl LogEntry {
             LogEntry::PreferredRound => "preferred_round",
             LogEntry::SignProposal => "sign_proposal",
             LogEntry::SignTimeout => "sign_timeout",
+            LogEntry::State => "state",
             LogEntry::Waypoint => "waypoint",
         }
     }

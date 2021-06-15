@@ -1,8 +1,8 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::common;
-use libra_types::transaction::{ArgumentABI, ScriptABI, TypeArgumentABI};
+use diem_types::transaction::{ArgumentABI, ScriptABI, TypeArgumentABI};
 use move_core_types::language_storage::TypeTag;
 use serde_generate::{
     indent::{IndentConfig, IndentedWriter},
@@ -78,7 +78,7 @@ fn write_script_call_files(
     package_name: &str,
     abis: &[ScriptABI],
 ) -> Result<()> {
-    let external_definitions = crate::common::get_external_definitions("org.libra.types");
+    let external_definitions = crate::common::get_external_definitions("com.diem.types");
     let script_registry: BTreeMap<_, _> = vec![(
         "ScriptCall".to_string(),
         common::make_abi_enum_container(abis),
@@ -122,7 +122,7 @@ fn prepare_doc_string(doc: &str) -> String {
     // Replace subsection titles.
     let doc = regex::Regex::new("##* (.*)\n")
         .unwrap()
-        .replace_all(&doc, "<p><b>$1</b>\n");
+        .replace_all(&doc, "<p><b>$1</b></p>\n");
     // Simulate lists.
     let doc = regex::Regex::new("\n\\* (.*)")
         .unwrap()
@@ -150,10 +150,10 @@ where
 import java.math.BigInteger;
 import java.lang.IllegalArgumentException;
 import java.lang.IndexOutOfBoundsException;
-import org.libra.types.AccountAddress;
-import org.libra.types.Script;
-import org.libra.types.TransactionArgument;
-import org.libra.types.TypeTag;
+import com.diem.types.AccountAddress;
+import com.diem.types.Script;
+import com.diem.types.TransactionArgument;
+import com.diem.types.TypeTag;
 import com.novi.serde.Int128;
 import com.novi.serde.Unsigned;
 import com.novi.serde.Bytes;
@@ -167,7 +167,7 @@ import com.novi.serde.Bytes;
             self.out,
             r#"
 /**
- * Build a Libra {{@link org.libra.types.Script}} from a structured value {{@link ScriptCall}}.
+ * Build a Diem {{@link com.diem.types.Script}} from a structured value {{@link ScriptCall}}.
  *
  * @param call {{@link ScriptCall}} value to encode.
  * @return Encoded script.
@@ -184,9 +184,9 @@ public static Script encode_script(ScriptCall call) {{
             self.out,
             r#"
 /**
- * Try to recognize a Libra {{@link org.libra.types.Script}} and convert it into a structured value {{@code ScriptCall}}.
+ * Try to recognize a Diem {{@link com.diem.types.Script}} and convert it into a structured value {{@code ScriptCall}}.
  *
- * @param script {{@link org.libra.types.Script}} values to decode.
+ * @param script {{@link com.diem.types.Script}} values to decode.
  * @return Decoded {{@link ScriptCall}} value.
  */
 public static ScriptCall decode_script(Script script) throws IllegalArgumentException, IndexOutOfBoundsException {{
@@ -234,7 +234,7 @@ public static ScriptCall decode_script(Script script) throws IllegalArgumentExce
             Self::quote_doc(
                 abi.doc(),
                 [quoted_type_params_doc, quoted_params_doc].concat(),
-                "Encoded {@link org.libra.types.Script} value.",
+                "Encoded {@link com.diem.types.Script} value.",
             ),
             abi.name(),
             [quoted_type_params, quoted_params].concat().join(", ")
@@ -431,7 +431,7 @@ private static {} decode_{}_argument(TransactionArgument arg) {{
         }
         doc = format!("{}\n@return {}", doc, return_doc);
         let text = textwrap::indent(&doc, " * ").replace("\n\n", "\n *\n");
-        format!("/**\n{} */\n", text)
+        format!("/**\n{}\n */\n", text)
     }
 
     fn quote_type_arguments(ty_args: &[TypeArgumentABI]) -> String {

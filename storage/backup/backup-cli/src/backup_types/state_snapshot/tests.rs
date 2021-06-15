@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
@@ -9,21 +9,23 @@ use crate::{
     storage::{local_fs::LocalFs, BackupStorage},
     utils::{
         backup_service_client::BackupServiceClient,
-        test_utils::{start_local_backup_service, tmp_db_empty, tmp_db_with_random_content},
-        GlobalBackupOpt, GlobalRestoreOpt,
+        test_utils::{start_local_backup_service, tmp_db_with_random_content},
+        ConcurrentDownloadsOpt, GlobalBackupOpt, GlobalRestoreOpt, RocksdbOpt, TrustedWaypointOpt,
     },
 };
-use libra_temppath::TempPath;
-use libra_types::transaction::PRE_GENESIS_VERSION;
-use libradb::GetRestoreHandler;
-use std::{path::PathBuf, sync::Arc};
+use diem_config::config::RocksdbConfig;
+use diem_temppath::TempPath;
+use diem_types::transaction::PRE_GENESIS_VERSION;
+use diemdb::DiemDB;
+use std::{convert::TryInto, sync::Arc};
 use storage_interface::DbReader;
 use tokio::time::Duration;
 
 #[test]
 fn end_to_end() {
     let (_src_db_dir, src_db, _blocks) = tmp_db_with_random_content();
-    let (_tgt_db_dir, tgt_db) = tmp_db_empty();
+    let tgt_db_dir = TempPath::new();
+    tgt_db_dir.create_as_dir().unwrap();
     let backup_dir = TempPath::new();
     backup_dir.create_as_dir().unwrap();
     let store: Arc<dyn BackupStorage> = Arc::new(LocalFs::new(backup_dir.path().to_path_buf()));
@@ -32,7 +34,7 @@ fn end_to_end() {
     let version = latest_tree_state.num_transactions - 1;
     let state_root_hash = latest_tree_state.account_state_root_hash;
 
-    let (mut rt, port) = start_local_backup_service(src_db);
+    let (rt, port) = start_local_backup_service(src_db);
     let client = Arc::new(BackupServiceClient::new(format!(
         "http://localhost:{}",
         port
@@ -59,13 +61,27 @@ fn end_to_end() {
                 version: PRE_GENESIS_VERSION,
             },
             GlobalRestoreOpt {
-                db_dir: PathBuf::new(),
+                dry_run: false,
+                db_dir: Some(tgt_db_dir.path().to_path_buf()),
                 target_version: None, // max
-            },
+                trusted_waypoints: TrustedWaypointOpt::default(),
+                rocksdb_opt: RocksdbOpt::default(),
+                concurernt_downloads: ConcurrentDownloadsOpt::default(),
+            }
+            .try_into()
+            .unwrap(),
             store,
-            Arc::new(tgt_db.get_restore_handler()),
+            None, /* epoch_history */
         )
         .run(),
+    )
+    .unwrap();
+
+    let tgt_db = DiemDB::open(
+        &tgt_db_dir,
+        true, /* read_only */
+        None, /* pruner */
+        RocksdbConfig::default(),
     )
     .unwrap();
     assert_eq!(

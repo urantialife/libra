@@ -1,11 +1,11 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
 
 pub mod dev;
 
-use libra_crypto::{
+use diem_crypto::{
     ed25519::{Ed25519PrivateKey, Ed25519PublicKey, Ed25519Signature, ED25519_PRIVATE_KEY_LENGTH},
     PrivateKey,
 };
@@ -15,6 +15,7 @@ use std::{
     collections::BTreeMap,
     convert::{TryFrom, TryInto},
     sync::Arc,
+    time::Duration,
 };
 use thiserror::Error;
 use ureq::Response;
@@ -22,13 +23,23 @@ use ureq::Response;
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing;
 
-/// Request timeout for vault operations
-const TIMEOUT: u64 = 10_000;
+/// The max number of key versions held in vault at any one time.
+/// Keys are trimmed in FIFO order.
+const MAX_NUM_KEY_VERSIONS: u32 = 4;
+
+/// Default request timeouts for vault operations.
+/// Note: there is a bug in ureq v 1.5.4 where it's not currently possible to set
+/// different timeouts for connections and operations. The connection timeout
+/// will override any other timeouts (including reads and writes). This has been
+/// fixed in ureq 2. Once we upgrade, we'll be able to have separate timeouts.
+/// Until then, the connection timeout is used for all operations.
+const DEFAULT_CONNECTION_TIMEOUT_MS: u64 = 1_000;
+const DEFAULT_RESPONSE_TIMEOUT_MS: u64 = 1_000;
 
 #[derive(Debug, Error, PartialEq)]
 pub enum Error {
-    #[error("Http error: {1}")]
-    HttpError(u16, String),
+    #[error("Http error, status code: {0}, status text: {1}, body: {2}")]
+    HttpError(u16, String, String),
     #[error("Internal error: {0}")]
     InternalError(String),
     #[error("Missing field {0}")]
@@ -37,6 +48,8 @@ pub enum Error {
     NotFound(String, String),
     #[error("Serialization error: {0}")]
     SerializationError(String),
+    #[error("Synthetic error returned: {0}")]
+    SyntheticError(String),
 }
 
 impl From<base64::DecodeError> for Error {
@@ -45,8 +58,8 @@ impl From<base64::DecodeError> for Error {
     }
 }
 
-impl From<libra_crypto::traits::CryptoMaterialError> for Error {
-    fn from(error: libra_crypto::traits::CryptoMaterialError) -> Self {
+impl From<diem_crypto::traits::CryptoMaterialError> for Error {
+    fn from(error: diem_crypto::traits::CryptoMaterialError) -> Self {
         Self::SerializationError(format!("{}", error))
     }
 }
@@ -59,15 +72,17 @@ impl From<std::io::Error> for Error {
 
 impl From<ureq::Response> for Error {
     fn from(resp: ureq::Response) -> Self {
-        if let Some(e) = resp.synthetic_error() {
-            // Local error
-            Error::InternalError(e.to_string())
-        } else {
-            // Clear buffer and use that as the message
-            let status = resp.status();
+        if resp.synthetic() {
             match resp.into_string() {
-                Ok(v) => Error::HttpError(status, v),
-                Err(e) => Error::InternalError(e.to_string()),
+                Ok(resp) => Error::SyntheticError(resp),
+                Err(error) => Error::InternalError(error.to_string()),
+            }
+        } else {
+            let status = resp.status();
+            let status_text = resp.status_text().to_string();
+            match resp.into_string() {
+                Ok(body) => Error::HttpError(status, status_text, body),
+                Err(error) => Error::InternalError(error.to_string()),
             }
         }
     }
@@ -97,29 +112,44 @@ pub struct Client {
     agent: ureq::Agent,
     host: String,
     token: String,
-    tls_config: Option<Arc<rustls::ClientConfig>>,
+    tls_connector: Arc<native_tls::TlsConnector>,
+
+    /// Timeout for new socket connections to vault.
+    connection_timeout_ms: u64,
+    /// Timeout for generic vault responses (e.g., reads and writes).
+    response_timeout_ms: u64,
 }
 
 impl Client {
-    pub fn new(host: String, token: String, ca_certificate: Option<String>) -> Self {
-        let tls_config = if let Some(certificate) = ca_certificate {
-            let mut tls_config = rustls::ClientConfig::new();
-            // First try the certificate as a DER encoded cert, then as a PEM, and then panic.
-            let cert = rustls::Certificate(certificate.as_bytes().to_vec());
-            if tls_config.root_store.add(&cert).is_err() {
-                let certs = rustls::internal::pemfile::certs(&mut certificate.as_bytes()).unwrap();
-                tls_config.root_store.add(&certs[0]).unwrap();
+    pub fn new(
+        host: String,
+        token: String,
+        ca_certificate: Option<String>,
+        connection_timeout_ms: Option<u64>,
+        response_timeout_ms: Option<u64>,
+    ) -> Self {
+        let mut tls_builder = native_tls::TlsConnector::builder();
+        tls_builder.min_protocol_version(Some(native_tls::Protocol::Tlsv12));
+        if let Some(certificate) = ca_certificate {
+            // First try the certificate as a PEM encoded cert, then as DER, and then panic.
+            let mut cert = native_tls::Certificate::from_pem(certificate.as_bytes());
+            if cert.is_err() {
+                cert = native_tls::Certificate::from_der(certificate.as_bytes());
             }
-            Some(Arc::new(tls_config))
-        } else {
-            None
-        };
+            tls_builder.add_root_certificate(cert.unwrap());
+        }
+        let tls_connector = Arc::new(tls_builder.build().unwrap());
+
+        let connection_timeout_ms = connection_timeout_ms.unwrap_or(DEFAULT_CONNECTION_TIMEOUT_MS);
+        let response_timeout_ms = response_timeout_ms.unwrap_or(DEFAULT_RESPONSE_TIMEOUT_MS);
 
         Self {
             agent: ureq::Agent::new().set("connection", "keep-alive").build(),
             host,
             token,
-            tls_config,
+            tls_connector,
+            connection_timeout_ms,
+            response_timeout_ms,
         }
     }
 
@@ -186,6 +216,16 @@ impl Client {
         };
 
         process_token_renew_response(resp)
+    }
+
+    pub fn revoke_token_self(&self) -> Result<(), Error> {
+        let request = self
+            .agent
+            .post(&format!("{}/v1/auth/token/revoke-self", self.host));
+        let mut request = self.upgrade_request(request);
+        let resp = request.call();
+
+        process_generic_response(resp)
     }
 
     /// List all stored secrets
@@ -304,6 +344,76 @@ impl Client {
         process_generic_response(resp)
     }
 
+    /// Trims the number of key versions held in vault storage. This prevents stale
+    /// keys from sitting around for too long and becoming susceptible to key
+    /// gathering attacks.
+    ///
+    /// Once the key versions have been trimmed, this method returns the most
+    /// recent (i.e., highest versioned) public key for the given cryptographic
+    /// key name.
+    pub fn trim_key_versions(&self, name: &str) -> Result<Ed25519PublicKey, Error> {
+        // Read all keys and versions
+        let all_pub_keys = self.read_ed25519_key(name)?;
+
+        // Find the maximum and minimum versions
+        let max_version = all_pub_keys
+            .iter()
+            .map(|resp| resp.version)
+            .max()
+            .ok_or_else(|| Error::NotFound("transit/".into(), name.into()))?;
+        let min_version = all_pub_keys
+            .iter()
+            .map(|resp| resp.version)
+            .min()
+            .ok_or_else(|| Error::NotFound("transit/".into(), name.into()))?;
+
+        // Trim keys if too many versions exist
+        if (max_version - min_version) >= MAX_NUM_KEY_VERSIONS {
+            let min_available_version = max_version - MAX_NUM_KEY_VERSIONS + 1;
+            self.set_minimum_encrypt_decrypt_version(name, min_available_version)?;
+            self.set_minimum_available_version(name, min_available_version)?;
+        };
+
+        let newest_pub_key = all_pub_keys
+            .iter()
+            .find(|pub_key| pub_key.version == max_version)
+            .ok_or_else(|| Error::NotFound("transit/".into(), name.into()))?;
+        Ok(newest_pub_key.value.clone())
+    }
+
+    /// Trims the key versions according to the minimum available version specified.
+    /// This operation deletes any older keys and cannot be undone.
+    fn set_minimum_available_version(
+        &self,
+        name: &str,
+        min_available_version: u32,
+    ) -> Result<(), Error> {
+        let request = self
+            .agent
+            .post(&format!("{}/v1/transit/keys/{}/trim", self.host, name));
+        let resp = self
+            .upgrade_request(request)
+            .send_json(json!({ "min_available_version": min_available_version }));
+
+        process_generic_response(resp)
+    }
+
+    /// Sets the minimum encryption and decryption versions for a named cryptographic key.
+    fn set_minimum_encrypt_decrypt_version(
+        &self,
+        name: &str,
+        min_version: u32,
+    ) -> Result<(), Error> {
+        let request = self
+            .agent
+            .post(&format!("{}/v1/transit/keys/{}/config", self.host, name));
+        let resp = self.upgrade_request(request).send_json(
+            json!({ "min_encryption_version": min_version, "min_decryption_version": min_version }),
+        );
+
+        process_generic_response(resp)
+    }
+
     pub fn sign_ed25519(
         &self,
         name: &str,
@@ -325,15 +435,30 @@ impl Client {
     }
 
     /// Create or update a key/value pair in a given secret store.
-    pub fn write_secret(&self, secret: &str, key: &str, value: &Value) -> Result<(), Error> {
+    pub fn write_secret(
+        &self,
+        secret: &str,
+        key: &str,
+        value: &Value,
+        version: Option<u32>,
+    ) -> Result<u32, Error> {
+        let payload = if let Some(version) = version {
+            json!({ "data": { key: value }, "options": {"cas": version} })
+        } else {
+            json!({ "data": { key: value } })
+        };
+
         let request = self
             .agent
             .put(&format!("{}/v1/secret/data/{}", self.host, secret));
-        let resp = self
-            .upgrade_request(request)
-            .send_json(json!({ "data": { key: value } }));
+        let resp = self.upgrade_request(request).send_json(payload);
 
-        process_generic_response(resp)
+        if resp.ok() {
+            let resp: WriteSecretResponse = serde_json::from_str(&resp.into_string()?)?;
+            Ok(resp.data.version)
+        } else {
+            Err(resp.into())
+        }
     }
 
     /// Returns whether or not the vault is unsealed (can be read from / written to). This can be
@@ -352,10 +477,9 @@ impl Client {
     }
 
     fn upgrade_request_without_token(&self, mut request: ureq::Request) -> ureq::Request {
-        request.timeout_connect(TIMEOUT);
-        if let Some(tls_config) = self.tls_config.as_ref() {
-            request.set_tls_config(tls_config.clone());
-        }
+        request.timeout_connect(self.connection_timeout_ms);
+        request.timeout(Duration::from_millis(self.response_timeout_ms));
+        request.set_tls_connector(self.tls_connector.clone());
         request
     }
 }
@@ -488,12 +612,12 @@ pub fn process_transit_export_response(
         let export_key: ExportKeyResponse = serde_json::from_str(&resp.into_string()?)?;
         let composite_key = if let Some(version) = version {
             let key = export_key.data.keys.iter().find(|(k, _v)| **k == version);
-            let (_, key) = key.ok_or_else(|| Error::NotFound("transit".into(), name.into()))?;
+            let (_, key) = key.ok_or_else(|| Error::NotFound("transit/".into(), name.into()))?;
             key
         } else if let Some(key) = export_key.data.keys.values().last() {
             key
         } else {
-            return Err(Error::NotFound("transit".into(), name.into()));
+            return Err(Error::NotFound("transit/".into(), name.into()));
         };
 
         let composite_key = base64::decode(composite_key)?;
@@ -598,7 +722,7 @@ pub fn process_unsealed_response(resp: Response) -> Result<bool, Error> {
 ///       "name":"local_owner_key__consensus",
 ///       "keys":{
 ///          "1":{
-///             "key":"C3R5O8uAfrgv7sJmCMSLEp1R2HmkZtwdfGT/xVvZVvgCGo6TkWga/ojplJFMM+i2805X3CV7IRyNLCSJcr4AqQ==",
+///             "key":"C3R5O8uAfrgv7sJmCMSLEp1R2HmkZtwdfGT/xVvZVvgCGo6TkWga/ojplJFMM+i2805X3CV7IRyNBCSJcr4AqQ==",
 ///             "hmac_key":null,
 ///             "time":"2020-05-29T06:27:38.1233515Z",
 ///             "ec_x":null,
@@ -651,24 +775,29 @@ impl KeyBackup {
         let now = chrono::Utc::now();
         let time_as_str = now.to_rfc3339();
 
-        let mut info = KeyBackupInfo::default();
-        info.key = Some(base64::encode(key_bytes));
-        info.public_key = Some(base64::encode(pub_key_bytes));
-        info.creation_time = now.timestamp_subsec_millis();
-        info.time = time_as_str.clone();
-
-        let mut key_backup = Self {
-            policy: KeyBackupPolicy::default(),
+        let info = KeyBackupInfo {
+            key: Some(base64::encode(key_bytes)),
+            public_key: Some(base64::encode(pub_key_bytes)),
+            creation_time: now.timestamp_subsec_millis(),
+            time: time_as_str.clone(),
+            ..Default::default()
         };
 
-        key_backup.policy.exportable = true;
-        key_backup.policy.min_decryption_version = 1;
-        key_backup.policy.latest_version = 1;
-        key_backup.policy.archive_version = 1;
-        key_backup.policy.backup_type = 2;
+        let mut key_backup = Self {
+            policy: KeyBackupPolicy {
+                exportable: true,
+                min_decryption_version: 1,
+                latest_version: 1,
+                archive_version: 1,
+                backup_type: 2,
+                backup_info: BackupInfo {
+                    time: time_as_str,
+                    version: 1,
+                },
+                ..Default::default()
+            },
+        };
         key_backup.policy.keys.insert(1, info);
-        key_backup.policy.backup_info.time = time_as_str;
-        key_backup.policy.backup_info.version = 1;
         key_backup
     }
 }
@@ -915,6 +1044,11 @@ struct ReadSecretData {
 struct ReadSecretMetadata {
     created_time: String,
     version: u32,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
+struct WriteSecretResponse {
+    data: ReadSecretMetadata,
 }
 
 /// {

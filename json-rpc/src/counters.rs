@@ -1,19 +1,36 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use libra_metrics::{
-    register_histogram_vec, register_int_counter, register_int_counter_vec, HistogramVec,
-    IntCounter, IntCounterVec,
-};
+use diem_metrics::{register_histogram_vec, register_int_counter_vec, HistogramVec, IntCounterVec};
 use once_cell::sync::Lazy;
+
+/// Cumulative number of rpc requests that the JSON RPC service receives
+pub static RPC_REQUESTS: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "diem_client_service_rpc_requests_count",
+        "Cumulative number of rpc requests that JSON RPC client service receives",
+        &["type"] // batch / single
+    )
+    .unwrap()
+});
+
+pub static RPC_REQUEST_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "diem_client_service_rpc_request_latency_seconds",
+        "Diem client service rpc request latency histogram",
+        &["type"] // batch / single
+    )
+    .unwrap()
+});
 
 /// Cumulative number of valid requests that the JSON RPC client service receives
 pub static REQUESTS: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
-        "libra_client_service_requests_count",
+        "diem_client_service_requests_count",
         "Cumulative number of requests that JSON RPC client service receives",
         &[
-            "type",   // type of request, matches JSON RPC method name (e.g. "submit", "get_account")
+            "type",   // batch / single
+            "method", // method of request, matches JSON RPC method name (e.g. "submit", "get_account")
             "result", // result of request: "success", "fail"
         ]
     )
@@ -23,41 +40,39 @@ pub static REQUESTS: Lazy<IntCounterVec> = Lazy::new(|| {
 /// Cumulative number of invalid requests that the JSON RPC client service receives
 pub static INVALID_REQUESTS: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
-        "libra_client_service_invalid_requests_count",
+        "diem_client_service_invalid_requests_count",
         "Cumulative number of invalid requests that JSON RPC client service receives",
         &[
-            "type", // categories of invalid requests: "invalid_format", "invalid_params", "invalid_method", "method_not_found"
+            "type",      // batch / single
+            "method", // method of request, matches JSON RPC method name (e.g. "submit", "get_account")
+            "errortype", // categories of invalid requests: "invalid_format", "invalid_params", "invalid_method", "method_not_found"
         ]
     )
     .unwrap()
 });
 
 /// Cumulative number of server internal errors.
-pub static INTERNAL_ERRORS: Lazy<IntCounter> = Lazy::new(|| {
-    register_int_counter!(
-        "libra_client_service_internal_error_count",
-        "Cumulative number of internal error"
+pub static INTERNAL_ERRORS: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "diem_client_service_internal_error_count",
+        "Cumulative number of internal error",
+        &[
+            "type",      // batch / single
+            "method", // method of request, matches JSON RPC method name (e.g. "submit", "get_account")
+            "errorcode", // error code
+        ]
     )
     .unwrap()
 });
 
 pub static METHOD_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
-        "libra_client_service_method_latency_seconds",
-        "Libra client service method latency histogram",
+        "diem_client_service_method_latency_seconds",
+        "Diem client service method latency histogram",
         &[
             "type",   // batch / single
             "method"  // JSON-RPC methods: submit, get_account ...
         ]
-    )
-    .unwrap()
-});
-
-pub static REQUEST_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
-    register_histogram_vec!(
-        "libra_client_service_request_latency_seconds",
-        "Libra client service request latency histogram",
-        &["type"] // batch / single
     )
     .unwrap()
 });

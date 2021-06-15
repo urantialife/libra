@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
@@ -12,11 +12,11 @@ pub mod compiled_unit;
 pub mod errors;
 pub mod expansion;
 pub mod hlir;
+pub mod interface_generator;
 pub mod ir_translation;
 pub mod naming;
 pub mod parser;
 pub mod shared;
-pub mod test_utils;
 mod to_bytecode;
 pub mod typing;
 
@@ -28,24 +28,65 @@ use move_ir_types::location::*;
 use parser::syntax::parse_file_string;
 use shared::Address;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
+    fs,
     fs::File,
     io::{Read, Write},
     iter::Peekable,
     path::{Path, PathBuf},
     str::Chars,
 };
+use tempfile::NamedTempFile;
 
 pub const MOVE_EXTENSION: &str = "move";
 pub const MOVE_COMPILED_EXTENSION: &str = "mv";
+pub const MOVE_COMPILED_INTERFACES_DIR: &str = "mv_interfaces";
 pub const SOURCE_MAP_EXTENSION: &str = "mvsm";
+
+#[macro_export]
+macro_rules! unwrap_or_report_errors {
+    ($files:ident, $res:ident) => {{
+        match $res {
+            Ok(t) => t,
+            Err(errors) => {
+                assert!(!errors.is_empty());
+                $crate::errors::report_errors($files, errors)
+            }
+        }
+    }};
+}
 
 //**************************************************************************************************
 // Entry
 //**************************************************************************************************
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Pass {
+    Parser,
+    Expansion,
+    Naming,
+    Typing,
+    HLIR,
+    CFGIR,
+    Compilation,
+}
+
+pub enum PassResult {
+    Parser(Option<Address>, parser::ast::Program),
+    Expansion(expansion::ast::Program, Errors),
+    Naming(naming::ast::Program, Errors),
+    Typing(typing::ast::Program),
+    HLIR(hlir::ast::Program, Errors),
+    CFGIR(cfgir::ast::Program),
+    Compilation(Vec<CompiledUnit>),
+}
+
 /// Given a set of targets and a set of dependencies
 /// - Checks the targets with the dependencies (targets can be dependencies of other targets)
+/// - If the `sources_shadow_deps` flag is set, modules defined in targets can shadow (i.e.,
+///   override) the modules in dependencies, and the checker will not complain about it. In other
+///   words, if the same module id (<address::name>) is found in both targets and dependencies, the
+///   module definition in targets takes priority.
 /// Does not run compile to Move bytecode
 /// Very large programs might fail on compilation even though they have been checked due to size
 ///   limitations of the Move bytecode
@@ -53,83 +94,149 @@ pub fn move_check(
     targets: &[String],
     deps: &[String],
     sender_opt: Option<Address>,
-) -> anyhow::Result<()> {
-    let (files, errors) = move_check_no_report(targets, deps, sender_opt)?;
-    if !errors.is_empty() {
-        errors::report_errors(files, errors)
-    }
-    Ok(())
+    interface_files_dir_opt: Option<String>,
+    sources_shadow_deps: bool,
+) -> anyhow::Result<(FilesSourceText, Result<(), Errors>)> {
+    let (files, pprog_and_comments_res) =
+        move_parse(targets, deps, sender_opt, interface_files_dir_opt)?;
+    let (_comments, sender_opt, pprog) = match pprog_and_comments_res {
+        Err(errors) => return Ok((files, Err(errors))),
+        Ok(res) => res,
+    };
+
+    let pprog = if sources_shadow_deps {
+        shadow_lib_module_definitions(pprog, sender_opt)
+    } else {
+        pprog
+    };
+
+    let result = match move_continue_up_to(PassResult::Parser(sender_opt, pprog), Pass::CFGIR) {
+        Ok(PassResult::CFGIR(_)) => Ok(()),
+        Ok(_) => unreachable!(),
+        Err(errors) => Err(errors),
+    };
+    Ok((files, result))
 }
 
-/// Move check but it returns the errors instead of reporting them to stderr
-pub fn move_check_no_report(
+/// Similar to move_check but it reports it's errors to stderr
+pub fn move_check_and_report(
     targets: &[String],
     deps: &[String],
     sender_opt: Option<Address>,
-) -> anyhow::Result<(FilesSourceText, Errors)> {
-    let (files, pprog_and_comments_res) = parse_program(targets, deps)?;
-    let pprog_res = pprog_and_comments_res.map(|(pprog, _)| pprog);
-    match check_program(pprog_res, sender_opt) {
-        Err(errors) => Ok((files, errors)),
-        Ok(_) => Ok((files, vec![])),
-    }
+    interface_files_dir_opt: Option<String>,
+    sources_shadow_deps: bool,
+) -> anyhow::Result<FilesSourceText> {
+    let (files, errors_result) = move_check(
+        targets,
+        deps,
+        sender_opt,
+        interface_files_dir_opt,
+        sources_shadow_deps,
+    )?;
+    unwrap_or_report_errors!(files, errors_result);
+    Ok(files)
 }
 
 /// Given a set of targets and a set of dependencies
 /// - Checks the targets with the dependencies (targets can be dependencies of other targets)
 /// - Compiles the targets to Move bytecode
+/// - If the `sources_shadow_deps` flag is set, modules defined in targets can shadow (i.e.,
+///   override) the modules in dependencies. In other words, if the same module id (<address::name>)
+///   is found in both targets and dependencies, the module definition in targets takes priority.
 /// Does not run the Move bytecode verifier on the compiled targets, as the Move front end should
 ///   be more restrictive
 pub fn move_compile(
     targets: &[String],
     deps: &[String],
     sender_opt: Option<Address>,
-) -> anyhow::Result<(FilesSourceText, Vec<CompiledUnit>)> {
-    let (files, pprog_and_comments_res) = parse_program(targets, deps)?;
-    let pprog_res = pprog_and_comments_res.map(|(pprog, _)| pprog);
-    match compile_program(pprog_res, sender_opt) {
-        Err(errors) => errors::report_errors(files, errors),
-        Ok(compiled_units) => Ok((files, compiled_units)),
-    }
-}
-
-/// Move compile but it returns the errors instead of reporting them to stderr
-pub fn move_compile_no_report(
-    targets: &[String],
-    deps: &[String],
-    sender_opt: Option<Address>,
+    interface_files_dir_opt: Option<String>,
+    sources_shadow_deps: bool,
 ) -> anyhow::Result<(FilesSourceText, Result<Vec<CompiledUnit>, Errors>)> {
-    let (files, pprog_and_comments_res) = parse_program(targets, deps)?;
-    let pprog_res = pprog_and_comments_res.map(|(pprog, _)| pprog);
-    Ok(match compile_program(pprog_res, sender_opt) {
-        Err(errors) => (files, Err(errors)),
-        Ok(units) => (files, Ok(units)),
-    })
+    let (files, pprog_and_comments_res) =
+        move_parse(targets, deps, sender_opt, interface_files_dir_opt)?;
+    let (_comments, sender_opt, pprog) = match pprog_and_comments_res {
+        Err(errors) => return Ok((files, Err(errors))),
+        Ok(res) => res,
+    };
+
+    let pprog = if sources_shadow_deps {
+        shadow_lib_module_definitions(pprog, sender_opt)
+    } else {
+        pprog
+    };
+
+    let result = match move_continue_up_to(PassResult::Parser(sender_opt, pprog), Pass::Compilation)
+    {
+        Ok(PassResult::Compilation(units)) => Ok(units),
+        Ok(_) => unreachable!(),
+        Err(errors) => Err(errors),
+    };
+    Ok((files, result))
 }
 
-/// Move compile up to expansion phase, returning errors instead of reporting them to stderr.
-///
-/// This also returns a map containing documentation comments for each source in `targets`.
-pub fn move_compile_to_expansion_no_report(
+/// Similar to move_compile but it reports it's errors to stderr
+pub fn move_compile_and_report(
     targets: &[String],
     deps: &[String],
     sender_opt: Option<Address>,
+    interface_files_dir_opt: Option<String>,
+    sources_shadow_deps: bool,
+) -> anyhow::Result<(FilesSourceText, Vec<CompiledUnit>)> {
+    let (files, units_res) = move_compile(
+        targets,
+        deps,
+        sender_opt,
+        interface_files_dir_opt,
+        sources_shadow_deps,
+    )?;
+    let units = unwrap_or_report_errors!(files, units_res);
+    Ok((files, units))
+}
+
+/// Given a set of targets and a set of dependencies, produces a `parser::ast::Program` along side a
+/// `CommentMap`. The `sender_opt` is returned for ease of use with `PassResult::Parser`
+pub fn move_parse(
+    targets: &[String],
+    deps: &[String],
+    sender_opt: Option<Address>,
+    interface_files_dir_opt: Option<String>,
 ) -> anyhow::Result<(
     FilesSourceText,
-    Result<(expansion::ast::Program, CommentMap), Errors>,
+    Result<(CommentMap, Option<Address>, parser::ast::Program), Errors>,
 )> {
-    let (files, pprog_and_comments_res) = parse_program(targets, deps)?;
-    let res = pprog_and_comments_res.and_then(|(pprog, comment_map)| {
-        let (eprog, errors) = expansion::translate::program(pprog, sender_opt);
-        check_errors(errors)?;
-        Ok((eprog, comment_map))
-    });
-    Ok((files, res))
+    let mut deps = deps.to_vec();
+    generate_interface_files_for_deps(&mut deps, interface_files_dir_opt)?;
+    let (files, pprog_and_comments_res) = parse_program(targets, &deps)?;
+    let result = pprog_and_comments_res.map(|(pprog, comments)| (comments, sender_opt, pprog));
+    Ok((files, result))
+}
+
+/// Runs the compiler from a previous result until a stopping point.
+/// The stopping point is inclusive, meaning the pass specified by `until: Pass` will be run
+pub fn move_continue_up_to(pass: PassResult, until: Pass) -> Result<PassResult, Errors> {
+    run(pass, until)
 }
 
 //**************************************************************************************************
 // Utils
 //**************************************************************************************************
+
+macro_rules! dir_path {
+    ($($dir:expr),+) => {{
+        let mut p = PathBuf::new();
+        $(p.push($dir);)+
+        p
+    }};
+}
+
+macro_rules! file_path {
+    ($dir:expr, $name:expr, $ext:expr) => {{
+        let mut p = PathBuf::from($dir);
+        p.push($name);
+        p.set_extension($ext);
+        p
+    }};
+}
 
 /// Runs the bytecode verifier on the compiled units
 /// Fails if the bytecode verifier errors
@@ -149,16 +256,22 @@ pub fn output_compiled_units(
 ) -> anyhow::Result<()> {
     const SCRIPT_SUB_DIR: &str = "scripts";
     const MODULE_SUB_DIR: &str = "modules";
+    fn num_digits(n: usize) -> usize {
+        format!("{}", n).len()
+    }
+    fn format_idx(idx: usize, width: usize) -> String {
+        format!("{:0width$}", idx, width = width)
+    }
 
     macro_rules! emit_unit {
         ($path:ident, $unit:ident) => {{
             if emit_source_maps {
                 $path.set_extension(SOURCE_MAP_EXTENSION);
-                File::create($path.as_path())?.write_all(&$unit.serialize_source_map())?;
+                fs::write($path.as_path(), &$unit.serialize_source_map())?;
             }
 
             $path.set_extension(MOVE_COMPILED_EXTENSION);
-            File::create($path.as_path())?.write_all(&$unit.serialize())?
+            fs::write($path.as_path(), &$unit.serialize())?
         }};
     }
 
@@ -169,25 +282,24 @@ pub fn output_compiled_units(
 
     // modules
     if !modules.is_empty() {
-        std::fs::create_dir_all(format!("{}/{}", out_dir, MODULE_SUB_DIR))?;
+        std::fs::create_dir_all(dir_path!(out_dir, MODULE_SUB_DIR))?;
     }
+    let digit_width = num_digits(modules.len());
     for (idx, unit) in modules.into_iter().enumerate() {
-        let mut path = PathBuf::from(format!(
-            "{}/{}/{}_{}",
+        let mut path = dir_path!(
             out_dir,
             MODULE_SUB_DIR,
-            idx,
-            unit.name(),
-        ));
+            format!("{}_{}", format_idx(idx, digit_width), unit.name())
+        );
         emit_unit!(path, unit);
     }
 
     // scripts
     if !scripts.is_empty() {
-        std::fs::create_dir_all(format!("{}/{}", out_dir, SCRIPT_SUB_DIR))?;
+        std::fs::create_dir_all(dir_path!(out_dir, SCRIPT_SUB_DIR))?;
     }
     for unit in scripts {
-        let mut path = PathBuf::from(format!("{}/{}/{}", out_dir, SCRIPT_SUB_DIR, unit.name()));
+        let mut path = dir_path!(out_dir, SCRIPT_SUB_DIR, unit.name());
         emit_unit!(path, unit);
     }
 
@@ -197,30 +309,239 @@ pub fn output_compiled_units(
     Ok(())
 }
 
+fn generate_interface_files_for_deps(
+    deps: &mut Vec<String>,
+    interface_files_dir_opt: Option<String>,
+) -> anyhow::Result<()> {
+    if let Some(dir) = generate_interface_files(deps, interface_files_dir_opt, true)? {
+        deps.push(dir)
+    }
+    Ok(())
+}
+
+pub fn generate_interface_files(
+    mv_file_locations: &[String],
+    interface_files_dir_opt: Option<String>,
+    separate_by_hash: bool,
+) -> anyhow::Result<Option<String>> {
+    let mv_files = {
+        let mut v = vec![];
+        let (mv_magic_files, other_file_locations): (Vec<_>, Vec<_>) = mv_file_locations
+            .iter()
+            .cloned()
+            .partition(|s| Path::new(s).is_file() && has_compiled_module_magic_number(s));
+        v.extend(mv_magic_files);
+        let mv_ext_files = find_filenames(&other_file_locations, |path| {
+            extension_equals(path, MOVE_COMPILED_EXTENSION)
+        })?;
+        v.extend(mv_ext_files);
+        v
+    };
+    if mv_files.is_empty() {
+        return Ok(None);
+    }
+
+    let interface_files_dir =
+        interface_files_dir_opt.unwrap_or_else(|| command_line::DEFAULT_OUTPUT_DIR.to_string());
+    let interface_sub_dir = dir_path!(interface_files_dir, MOVE_COMPILED_INTERFACES_DIR);
+    let all_addr_dir = if separate_by_hash {
+        use std::{
+            collections::hash_map::DefaultHasher,
+            hash::{Hash, Hasher},
+        };
+        const HASH_DELIM: &str = "%|%";
+
+        let mut hasher = DefaultHasher::new();
+        mv_files.len().hash(&mut hasher);
+        HASH_DELIM.hash(&mut hasher);
+        for mv_file in &mv_files {
+            std::fs::read(mv_file)?.hash(&mut hasher);
+            HASH_DELIM.hash(&mut hasher);
+        }
+
+        let mut dir = interface_sub_dir;
+        dir.push(format!("{:020}", hasher.finish()));
+        dir
+    } else {
+        interface_sub_dir
+    };
+
+    for mv_file in mv_files {
+        let (id, interface_contents) = interface_generator::write_to_string(&mv_file)?;
+        let addr_dir = dir_path!(all_addr_dir.clone(), format!("{}", id.address()));
+        let file_path = file_path!(addr_dir.clone(), format!("{}", id.name()), MOVE_EXTENSION);
+        // it's possible some files exist but not others due to multithreaded environments
+        if separate_by_hash && Path::new(&file_path).is_file() {
+            continue;
+        }
+
+        std::fs::create_dir_all(&addr_dir)?;
+
+        let mut tmp = NamedTempFile::new_in(addr_dir)?;
+        tmp.write_all(interface_contents.as_bytes())?;
+
+        // it's possible some files exist but not others due to multithreaded environments
+        // Check for the file existing and then safely move the tmp file there if
+        // it does not
+        if separate_by_hash && Path::new(&file_path).is_file() {
+            continue;
+        }
+        std::fs::rename(tmp.path(), file_path)?;
+    }
+
+    Ok(Some(all_addr_dir.into_os_string().into_string().unwrap()))
+}
+
+/// Given a parsed program, if a module id is found in both the source and lib definitions, filter
+/// out the lib definition and re-construct a new parsed program
+fn shadow_lib_module_definitions(
+    pprog: parser::ast::Program,
+    sender_opt: Option<Address>,
+) -> parser::ast::Program {
+    let parser::ast::Program {
+        source_definitions,
+        lib_definitions,
+    } = pprog;
+    let mut modules_defined_in_src = BTreeSet::new();
+    for def in &source_definitions {
+        match def {
+            parser::ast::Definition::Address(_, addr, modules) => {
+                for module in modules {
+                    modules_defined_in_src.insert((*addr, module.name.clone()));
+                }
+            }
+            parser::ast::Definition::Module(module) => {
+                modules_defined_in_src
+                    .insert((sender_opt.unwrap_or_default(), module.name.clone()));
+            }
+            parser::ast::Definition::Script(_) => (),
+        }
+    }
+
+    // Shadow (i.e., filter out) library definitions with the following criteria
+    //  1. this library definition is an Address space AST and any module in the address space is
+    //    already defined in the source.
+    //  2. this library definition is a Module AST and the module is already defined in the source.
+    let lib_definitions = lib_definitions
+        .into_iter()
+        .filter(|def| match def {
+            parser::ast::Definition::Address(_, addr, modules) => !modules
+                .iter()
+                .any(|module| modules_defined_in_src.contains(&(*addr, module.name.clone()))),
+            parser::ast::Definition::Module(module) => !modules_defined_in_src
+                .contains(&(sender_opt.unwrap_or_default(), module.name.clone())),
+            parser::ast::Definition::Script(_) => false,
+        })
+        .collect();
+
+    parser::ast::Program {
+        source_definitions,
+        lib_definitions,
+    }
+}
+
+fn has_compiled_module_magic_number(path: &str) -> bool {
+    use move_vm::file_format_common::BinaryConstants;
+    let mut file = match File::open(path) {
+        Err(_) => return false,
+        Ok(f) => f,
+    };
+    let mut magic = [0u8; BinaryConstants::DIEM_MAGIC_SIZE];
+    let num_bytes_read = match file.read(&mut magic) {
+        Err(_) => return false,
+        Ok(n) => n,
+    };
+    num_bytes_read == BinaryConstants::DIEM_MAGIC_SIZE && magic == BinaryConstants::DIEM_MAGIC
+}
+
+pub fn path_to_string(path: &Path) -> anyhow::Result<String> {
+    match path.to_str() {
+        Some(p) => Ok(p.to_string()),
+        None => Err(anyhow!("non-Unicode file name")),
+    }
+}
+
+pub fn extension_equals(path: &Path, target_ext: &str) -> bool {
+    match path.extension().and_then(|s| s.to_str()) {
+        Some(extension) => extension == target_ext,
+        None => false,
+    }
+}
+
 //**************************************************************************************************
 // Translations
 //**************************************************************************************************
 
-fn check_program(
-    prog: Result<parser::ast::Program, Errors>,
-    sender_opt: Option<Address>,
-) -> Result<cfgir::ast::Program, Errors> {
-    let (eprog, errors) = expansion::translate::program(prog?, sender_opt);
-    let (nprog, errors) = naming::translate::program(eprog, errors);
-    let (tprog, errors) = typing::translate::program(nprog, errors);
-    check_errors(errors)?;
-    let (hprog, errors) = hlir::translate::program(tprog);
-    let (cprog, errors) = cfgir::translate::program(errors, hprog);
-    check_errors(errors)?;
-    Ok(cprog)
+impl PassResult {
+    pub fn equivalent_pass(&self) -> Pass {
+        match self {
+            PassResult::Parser(_, _) => Pass::Parser,
+            PassResult::Expansion(_, _) => Pass::Expansion,
+            PassResult::Naming(_, _) => Pass::Naming,
+            PassResult::Typing(_) => Pass::Typing,
+            PassResult::HLIR(_, _) => Pass::HLIR,
+            PassResult::CFGIR(_) => Pass::CFGIR,
+            PassResult::Compilation(_) => Pass::Compilation,
+        }
+    }
+
+    pub fn check_for_errors(self) -> Result<Self, Errors> {
+        Ok(match self {
+            result @ PassResult::Parser(_, _)
+            | result @ PassResult::Typing(_)
+            | result @ PassResult::CFGIR(_)
+            | result @ PassResult::Compilation(_) => result,
+            PassResult::Expansion(eprog, errors) => {
+                check_errors(errors)?;
+                PassResult::Expansion(eprog, Errors::new())
+            }
+            PassResult::Naming(nprog, errors) => {
+                check_errors(errors)?;
+                PassResult::Naming(nprog, Errors::new())
+            }
+            PassResult::HLIR(hprog, errors) => {
+                check_errors(errors)?;
+                PassResult::HLIR(hprog, Errors::new())
+            }
+        })
+    }
 }
 
-fn compile_program(
-    prog: Result<parser::ast::Program, Errors>,
-    sender_opt: Option<Address>,
-) -> Result<Vec<CompiledUnit>, Errors> {
-    let cprog = check_program(prog, sender_opt)?;
-    to_bytecode::translate::program(cprog)
+fn run(cur: PassResult, until: Pass) -> Result<PassResult, Errors> {
+    if cur.equivalent_pass() >= until {
+        return Ok(cur);
+    }
+
+    match cur {
+        PassResult::Parser(sender_opt, prog) => {
+            let (eprog, errors) = expansion::translate::program(prog, sender_opt);
+            run(PassResult::Expansion(eprog, errors), until)
+        }
+        PassResult::Expansion(eprog, errors) => {
+            let (nprog, errors) = naming::translate::program(eprog, errors);
+            run(PassResult::Naming(nprog, errors), until)
+        }
+        PassResult::Naming(nprog, errors) => {
+            let (tprog, errors) = typing::translate::program(nprog, errors);
+            check_errors(errors)?;
+            run(PassResult::Typing(tprog), until)
+        }
+        PassResult::Typing(tprog) => {
+            let (hprog, errors) = hlir::translate::program(tprog);
+            run(PassResult::HLIR(hprog, errors), until)
+        }
+        PassResult::HLIR(hprog, errors) => {
+            let (cprog, errors) = cfgir::translate::program(errors, hprog);
+            check_errors(errors)?;
+            run(PassResult::CFGIR(cprog), until)
+        }
+        PassResult::CFGIR(cprog) => {
+            let compiled_units = to_bytecode::translate::program(cprog)?;
+            assert!(until == Pass::Compilation);
+            run(PassResult::Compilation(compiled_units), Pass::Compilation)
+        }
+        PassResult::Compilation(_) => unreachable!("ICE Pass::Compilation is >= all passes"),
+    }
 }
 
 //**************************************************************************************************
@@ -234,14 +555,15 @@ fn parse_program(
     FilesSourceText,
     Result<(parser::ast::Program, CommentMap), Errors>,
 )> {
-    let targets = find_move_filenames(targets)?
+    let targets = find_move_filenames(targets, true)?
         .iter()
         .map(|s| leak_str(s))
         .collect::<Vec<&'static str>>();
-    let deps = find_move_filenames(deps)?
+    let deps = find_move_filenames(deps, true)?
         .iter()
         .map(|s| leak_str(s))
         .collect::<Vec<&'static str>>();
+    check_targets_deps_dont_intersect(&targets, &deps)?;
     let mut files: FilesSourceText = HashMap::new();
     let mut source_definitions = Vec::new();
     let mut source_comments = CommentMap::new();
@@ -275,21 +597,67 @@ fn parse_program(
     Ok((files, res))
 }
 
-pub fn find_move_filenames(files: &[String]) -> anyhow::Result<Vec<String>> {
+fn check_targets_deps_dont_intersect(
+    targets: &[&'static str],
+    deps: &[&'static str],
+) -> anyhow::Result<()> {
+    let target_set = targets.iter().collect::<BTreeSet<_>>();
+    let dep_set = deps.iter().collect::<BTreeSet<_>>();
+    let intersection = target_set.intersection(&dep_set).collect::<Vec<_>>();
+    if intersection.is_empty() {
+        return Ok(());
+    }
+
+    let all_files = intersection
+        .into_iter()
+        .map(|s| format!("    {}", s))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Err(anyhow!(
+        "The following files were marked as both targets and dependencies:\n{}",
+        all_files
+    ))
+}
+
+/// - For each directory in `paths`, it will return all files with the `MOVE_EXTENSION` found
+///   recursively in that directory
+/// - If `keep_specified_files` any file explicitly passed in `paths`, will be added to the result
+///   Otherwise, they will be discarded
+pub fn find_move_filenames(
+    paths: &[String],
+    keep_specified_files: bool,
+) -> anyhow::Result<Vec<String>> {
+    if keep_specified_files {
+        let (mut files, other_paths): (Vec<String>, Vec<String>) =
+            paths.iter().cloned().partition(|s| Path::new(s).is_file());
+        files.extend(find_filenames(&other_paths, |path| {
+            extension_equals(path, MOVE_EXTENSION)
+        })?);
+        Ok(files)
+    } else {
+        find_filenames(paths, |path| extension_equals(path, MOVE_EXTENSION))
+    }
+}
+
+/// - For each directory in `paths`, it will return all files that satisfy the predicate
+/// - Any file explicitly passed in `paths`, it will include that file in the result, regardless
+///   of the file extension
+pub fn find_filenames<Predicate: FnMut(&Path) -> bool>(
+    paths: &[String],
+    mut is_file_desired: Predicate,
+) -> anyhow::Result<Vec<String>> {
     let mut result = vec![];
-    let has_move_extension = |path: &Path| match path.extension().and_then(|s| s.to_str()) {
-        Some(extension) => extension == MOVE_EXTENSION,
-        None => false,
-    };
-    for file in files {
-        let path = Path::new(file);
+
+    for s in paths {
+        let path = Path::new(s);
         if !path.exists() {
-            return Err(anyhow!(format!("No such file or directory '{}'", file)));
+            return Err(anyhow!(format!("No such file or directory '{}'", s)));
+        }
+        if path.is_file() && is_file_desired(path) {
+            result.push(path_to_string(path)?);
+            continue;
         }
         if !path.is_dir() {
-            // If the filename is specified directly, add it to the list, regardless
-            // of whether it has a ".move" extension.
-            result.push(file.clone());
             continue;
         }
         for entry in walkdir::WalkDir::new(path)
@@ -297,15 +665,11 @@ pub fn find_move_filenames(files: &[String]) -> anyhow::Result<Vec<String>> {
             .filter_map(|e| e.ok())
         {
             let entry_path = entry.path();
-            if !entry.file_type().is_file() || !has_move_extension(&entry_path) {
+            if !entry.file_type().is_file() || !is_file_desired(&entry_path) {
                 continue;
             }
-            match entry_path.to_str() {
-                Some(p) => result.push(p.to_string()),
-                None => {
-                    return Err(anyhow!("non-Unicode file name"));
-                }
-            }
+
+            result.push(path_to_string(entry_path)?);
         }
     }
     Ok(result)

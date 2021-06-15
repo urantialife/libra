@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 //! Low-level module for establishing connections with peers
@@ -11,16 +11,16 @@
 //! [`Transport`]: crate::transport::Transport
 //! [`TransportExt`]: crate::transport::TransportExt
 
+use diem_types::{network_address::NetworkAddress, PeerId};
 use futures::{future::Future, stream::Stream};
-use libra_network_address::NetworkAddress;
-use libra_types::PeerId;
-use serde::{export::Formatter, Serialize};
+use serde::Serialize;
 use std::fmt;
 
 pub mod and_then;
 pub mod boxed;
 #[cfg(any(test, feature = "testing", feature = "fuzzing"))]
 pub mod memory;
+pub mod proxy_protocol;
 pub mod tcp;
 
 /// Origin of how a Connection was established.
@@ -32,22 +32,24 @@ pub enum ConnectionOrigin {
     Outbound,
 }
 
+impl ConnectionOrigin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConnectionOrigin::Inbound => "inbound",
+            ConnectionOrigin::Outbound => "outbound",
+        }
+    }
+}
+
 impl fmt::Debug for ConnectionOrigin {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self)
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
 impl fmt::Display for ConnectionOrigin {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                ConnectionOrigin::Inbound => "Inbound",
-                ConnectionOrigin::Outbound => "Outbound",
-            }
-        )
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

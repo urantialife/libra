@@ -1,11 +1,11 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
 
-//! Consensus for the Libra Core blockchain
+//! Consensus for the Diem Core blockchain
 //!
-//! The consensus protocol implemented is LibraBFT (based on
+//! The consensus protocol implemented is DiemBFT (based on
 //! [HotStuff](https://arxiv.org/pdf/1803.05069.pdf)).
 
 #![cfg_attr(not(feature = "fuzzing"), deny(missing_docs))]
@@ -16,7 +16,9 @@ mod block_storage;
 mod consensusdb;
 mod counters;
 mod epoch_manager;
+mod error;
 mod liveness;
+mod logging;
 mod metrics_safety_rules;
 mod network;
 #[cfg(test)]
@@ -29,13 +31,13 @@ mod state_replication;
 #[cfg(any(test, feature = "fuzzing"))]
 mod test_utils;
 #[cfg(test)]
-mod twins_test;
+mod twins;
 mod txn_manager;
 mod util;
 
-/// LibraBFT implementation
+/// DiemBFT implementation
 pub mod consensus_provider;
-/// LibraNet interface.
+/// DiemNet interface.
 pub mod network_interface;
 
 #[cfg(feature = "fuzzing")]

@@ -18,7 +18,9 @@ A transaction on the blockchain.
 | vm_status                 | [VMStatus](#type-vmstatus)               | The returned status of the transaction after being processed by the VM                     |
 | gas_used                  | unsigned int64 | Amount of gas used by this transaction, to know how much you paid for the transaction, you need multiply it with your RawTransaction#gas_unit_price |
 
-Note: For the gas_used, internally within the VM we scale the gas units down by 1000 in order to allow granularity of costing for instruction, but without having to use floating point numbers, but we do round-up the gas used to the nearest "1" when we convert back out.
+Note:
+* For the gas_used, internally within the VM we scale the gas units down by 1000 in order to allow granularity of costing for instruction, but without having to use floating point numbers, but we do round-up the gas used to the nearest "1" when we convert back out.
+* Formula to create hash for a signed transaction before it is executed: hex-encode(sha3-256([]byte("DIEM::Transaction")) + []byte(0) + signed transaction bytes) ([implementation example](https://github.com/diem/client-sdk-go/blob/master/diemtypes/hash.go#L27))
 
 
 ### Example
@@ -48,7 +50,7 @@ Transaction data is serialized into one JSON object with a "type" field to indic
 
 #### blockmetadata
 
-A Libra network transaction that contains the metadata for the block. This transaction is always at the beginning of a block.
+A Diem network transaction that contains the metadata for the block. This transaction is always at the beginning of a block.
 
 | Name                | Type           | Description                                                    |
 |---------------------|----------------|----------------------------------------------------------------|
@@ -57,7 +59,7 @@ A Libra network transaction that contains the metadata for the block. This trans
 
 #### writeset
 
-A Libra network transaction that modifies storage data directly. Currently, no details are exposed in the API.
+A Diem network transaction that modifies storage data directly. Currently, no details are exposed in the API.
 
 | Name                | Type           | Description                                                    |
 |---------------------|----------------|----------------------------------------------------------------|
@@ -75,15 +77,25 @@ User submitted transaction.
 | signature                 | string                 | Hex-encoded signature of this transaction                             |
 | public_key                | string                 | Hex-encoded public key of the transaction sender                      |
 | sequence_number           | unsigned int64         | Sequence number of this transaction corresponding to sender's account |
-| chain_id                  | unsigned int8          | Chain ID of the Libra network this transaction is intended for        |
+| chain_id                  | unsigned int8          | Chain ID of the Diem network this transaction is intended for        |
 | max_gas_amount            | unsigned int64         | Maximum amount of gas that can be spent for this transaction          |
 | gas_unit_price            | unsigned int64         | Maximum gas price to be paid per unit of gas                          |
+| gas_currency              | string                 | Gas price currency code                                               |
 | expiration_timestamp_secs | unsigned int64         | The expiration time (Unix Epoch in seconds) for this transaction      |
-| script_hash               | string                 | Hex-encoded hash of the script used in this transaction               |
-| script_bytes              | string                 | Hex-encoded string of the bytes of the script                         |
-| script                    | [Script](#type-script) | The transaction script and arguments of this transaction              |
+| script_hash               | string                 | Hex-encoded sha3 256 hash of the script binary code bytes used in this transaction |
+| script_bytes              | string                 | Hex-encoded string of BCS bytes of the script, decode it to get back transaction script arguments |
+| script                    | [Script](#type-script) | The transaction script and arguments of this transaction, you can decode `script_bytes` by BCS to get same data. |
 
-TODO: how the script_hash is created?
+Note: script_hash is not hash of the script_bytes, it's hash of the script binary code bytes. More specifically, you can get same hash string by the following steps:
+
+    1. Decode script_bytes into script call [struct](https://developers.diem.com/docs/rustdocs/diem_types/transaction/struct.Script.html).
+    2. Sha3 256 hash of the code binary bytes in the script call struct.
+    3. Hex-encode the hash result bytes.
+
+* You can decode transaction script call ([struct](https://developers.diem.com/docs/rustdocs/diem_types/transaction/struct.Script.html)) from script_bytes by BCS deserializer.
+* If script_bytes is empty, it means transaction is not a [TransactionPayload#Script](https://developers.diem.com/docs/rustdocs/diem_types/transaction/enum.TransactionPayload.html#variant.Script).
+You may decode Transaction#bytes by BCS deserializer for more details.
+
 
 #### unknown
 
@@ -96,51 +108,51 @@ Metadata for unsupported transaction types
 
 ### Type Script
 
-The transaction script and arguments of this transaction.
+The transaction script and arguments of the script call.
 
-Transaction data is serialized into one JSON object with a "type" field to indicate it's type.
+| Name           | Type         | Description                                   |
+|----------------|--------------|-----------------------------------------------|
+| type           | string       | Name of the script code, see [transaction script doc](../../language/diem-framework/transaction_scripts/doc/transaction_script_documentation.md) for all available script names. |
+| code           | string       | Hex-encoded compiled move script bytes        |
+| arguments      | List<string> | List of string value of the script arguments. Contains type information. |
+| type_arguments | List<string> | List of type arguments, converted into string |
 
-| Name                | Type           | Description                                                    |
-|---------------------|----------------|----------------------------------------------------------------|
-| type                | string         | Type name of Script data                                       |
-
-
-**All other fields are arguments of the Move script submitted with RawTransaction#Script.**
-
-
-#### peer_to_peer_transaction
-
-Transaction script for peer-to-peer transfer of resource
-
-| Name                      | Type           | Description                                                                                             |
-|---------------------------|----------------|---------------------------------------------------------------------------------------------------------|
-| type                      | string         | constant of string "peer_to_peer_transaction"                                                           |
-| receiver                  | string         | Hex-encoded account address of the receiver                                                             |
-| amount                    | unsigned 64    | amount transfered in microlibras                                                                        |
-| currency                  | string         | Currency code                                                                                           |
-| metadata                  | string         | Metadata from RawTransaction#Script, LCS serialized hex-encoded string [server side data structure][1]. |
-| metadata_signature        | string         | Hex-encoded metadata signature, use this to validate metadata                                           |
-
-#### mint_transaction
-
-Transaction script for a special transaction used by the faucet to mint Libra and send to a user.
-
-| Name                      | Type           | Description                                                           |
-|---------------------------|----------------|-----------------------------------------------------------------------|
-| type                      | string         | constant of string "mint_transaction"                                 |
-| receiver                  | string         | Hex-encoded account address of the receiver                           |
-| auth_key_prefix           | string         | Hex-encoded auth_key prefix                                           |
-| amount                    | unsigned int64 | The amount of microlibras being sent                                  |
+* Argument value to string formatting:
+  * u8 value `12` => "{U8: 12}"
+  * u64 value `12244` => "{U64: 12244}"
+  * u128 value `12244` => "{U128: 12244}"
+  * boolean value `true` => "{BOOL: true}"
+  * Account address value => "{ADDRESS: <hex-encoded account address bytes>}"
+  * List<u8> value => "{U8Vector:: 0x<hex-encoded bytes>}"
 
 
-#### unknown_transaction
+#### unknown
 
-Currently unsupported transaction script
+Transaction script is unknown.
 
-| Name                      | Type           | Description                                                           |
-|---------------------------|----------------|-----------------------------------------------------------------------|
-| type                      | string         | constant of string "unknown_transaction"                              |
+* When script code can't be recognized, type will be set to `unknown`, code, arguments and type_arguments will still be provided.
+* When transaction payload is not a script (see [TransactionPayload](https://developers.diem.com/docs/rustdocs/diem_types/transaction/enum.TransactionPayload.html)),
+type will be set to `unknown`, code, arguments and type_arguments will not be provided.
 
+| Name                      | Type           | Description                  |
+|---------------------------|----------------|------------------------------|
+| type                      | string         | constant of string "unknown" |
+
+
+#### peer_to_peer_with_metadata
+
+This type was named `peer_to_peer_transaction`, to keep script#type consistent with stdlib transaction script names, we renamed it `peer_to_peer_with_metadata`.
+This is the only type we decoded script arguments and type_arguments as named fields for backward compatible:
+
+| Name                      | Type           | Description                                                         |
+|---------------------------|----------------|---------------------------------------------------------------------|
+| receiver                  | string         | Hex-encoded account address of the receiver                         |
+| amount                    | unsigned int64 | Amount transfered.                                                  |
+| currency                  | string         | Currency code.                                                      |
+| metadata                  | string         | Metadata of the transaction, BCS serialized hex-encoded string.     |
+| metadata_signature        | string         | Hex-encoded metadata signature, use this to validate metadata       |
+
+Note: for metadata and metadata_signature, see [DIP-4](https://dip.diem.com/dip-4/) for more details.
 
 ### Type VMStatus
 
@@ -154,9 +166,9 @@ Successful execution.
 {type: "executed"}
 ```
 
-| Name                      | Type           | Description                                                           |
-|---------------------------|----------------|-----------------------------------------------------------------------|
-| type                      | string         | constant of string "executed"                              |
+| Name                      | Type           | Description                                       |
+|---------------------------|----------------|---------------------------------------------------|
+| type                      | string         | constant of string "executed"                     |
 
 #### out_of_gas
 Transaction execution runs out of gas, no effect.
@@ -165,24 +177,25 @@ Transaction execution runs out of gas, no effect.
 {type: "out_of_gas"}
 ```
 
-| Name                      | Type           | Description                                                           |
-|---------------------------|----------------|-----------------------------------------------------------------------|
-| type                      | string         | constant of string "out_of_gas"                              |
+| Name                      | Type           | Description                                       |
+|---------------------------|----------------|---------------------------------------------------|
+| type                      | string         | constant of string "out_of_gas"                   |
 
 #### move_abort
 
 Object representing the abort condition raised by Move code via `abort` or `assert` during execution of a transaction by the VM on the blockchain.
 
 ```
-{ type: "move_abort", location: string, abort_code: unsigned int64 }
+{ type: "move_abort", location: string, abort_code: unsigned int64, explanation: object MoveAbortExplanation or "null" }
 ```
 
 
-| Name       | Type           | Description                                                                                                                                  |
-|------------|----------------|----------------------------------------------------------------------------------------------------------------------------------------------|
-| type       | string         | constant of string "move_abort"                              |
-| location   | string         | String of the form "address::moduleName" where the abort condition was triggered. "Script" if the abort was raised in the transaction script |
-| abort_code | unsigned int64 | Abort code raised by the Move module                                                                                                         |
+| Name          | Type                                                        | Description                                                                                                                                    |
+| ------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| type          | string                                                      | constant of string "move_abort"                                                                                                                |
+| location      | string                                                      | String of the form "address::moduleName" where the abort condition was triggered. "Script" if the abort was raised in the transaction script   |
+| abort_code    | unsigned int64                                              | Abort code raised by the Move module                                                                                                           |
+| explanation   | [MoveAbortExplanation](#type-moveabortexplanation)>         | Human readable explanation for abort code. "null" if no explanation found.                                                                     |
 
 #### execution_failure
 
@@ -220,4 +233,29 @@ Note that this explicitly excludes any invariant violation coming from inside of
 |---------------------------|----------------|-----------------------------------------------------------------------|
 | type                      | string         | constant of string "miscellaneous_error"                              |
 
-[1]: https://libra.github.io/libra/libra_types/transaction/metadata/enum.Metadata.html "Transaction Metadata"
+### Type MoveAbortExplanation
+
+a `MoveAbortExplanation` is an object containing globally-defined categories for the abort error e.g., `INVALID_ARGUMENT` along with the Move-module-specific
+error reason for the error e.g., `EPAYEE_CANT_ACCEPT_CURRENCY_TYPE`. Both the category and reason are augmented with human-readable descriptions for each.
+
+### Example
+
+```
+   {
+      "category":"INVALID_ARGUMENT",
+      "category_description":" An argument provided to an operation is invalid. Example: a signing key has the wrong format.",
+      "reason":"EPAYEE_CANT_ACCEPT_CURRENCY_TYPE",
+      "reason_description":" Attempted to send funds in a currency that the receiving account does not hold.\n e.g., `Diem<XDX> to an account that exists, but does not have a `Balance<XDX>` resource"
+   }
+```
+
+```
+{ category: string, category_description: string, reason: string, reason_description: string }
+```
+
+| Name                      | Type           | Description                                                           |
+|---------------------------|----------------|-----------------------------------------------------------------------|
+| category                  | string         | Globally-defined error category                                       |
+| category_description      | string         | Description of the error category                                     |
+| reason                    | string         | Module-specific error reason                                          |
+| reason_description        | string         | Description of the error reason                                       |

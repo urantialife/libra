@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{ConsensusState, Error, SafetyRules, TSafetyRules};
@@ -6,9 +6,10 @@ use consensus_types::{
     block::Block, block_data::BlockData, timeout::Timeout, vote::Vote,
     vote_proposal::MaybeSignedVoteProposal,
 };
-use libra_crypto::ed25519::Ed25519Signature;
-use libra_types::epoch_change::EpochChangeProof;
-use std::sync::{Arc, RwLock};
+use diem_crypto::ed25519::Ed25519Signature;
+use diem_infallible::RwLock;
+use diem_types::epoch_change::EpochChangeProof;
+use std::sync::Arc;
 
 /// A local interface into SafetyRules. Constructed in such a way that the container / caller
 /// cannot distinguish this API from an actual client/server process without being exposed to
@@ -25,28 +26,25 @@ impl LocalClient {
 
 impl TSafetyRules for LocalClient {
     fn consensus_state(&mut self) -> Result<ConsensusState, Error> {
-        self.internal.write().unwrap().consensus_state()
+        self.internal.write().consensus_state()
     }
 
     fn initialize(&mut self, proof: &EpochChangeProof) -> Result<(), Error> {
-        self.internal.write().unwrap().initialize(proof)
+        self.internal.write().initialize(proof)
     }
 
     fn construct_and_sign_vote(
         &mut self,
         vote_proposal: &MaybeSignedVoteProposal,
     ) -> Result<Vote, Error> {
-        self.internal
-            .write()
-            .unwrap()
-            .construct_and_sign_vote(vote_proposal)
+        self.internal.write().construct_and_sign_vote(vote_proposal)
     }
 
     fn sign_proposal(&mut self, block_data: BlockData) -> Result<Block, Error> {
-        self.internal.write().unwrap().sign_proposal(block_data)
+        self.internal.write().sign_proposal(block_data)
     }
 
     fn sign_timeout(&mut self, timeout: &Timeout) -> Result<Ed25519Signature, Error> {
-        self.internal.write().unwrap().sign_timeout(timeout)
+        self.internal.write().sign_timeout(timeout)
     }
 }

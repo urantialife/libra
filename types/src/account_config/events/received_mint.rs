@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::account_address::AccountAddress;
@@ -13,9 +13,9 @@ use serde::{Deserialize, Serialize};
 /// Struct that represents a ReceivedMintEvent.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReceivedMintEvent {
-    amount: u64,
     currency_code: Identifier,
     destination_address: AccountAddress,
+    amount: u64,
 }
 
 impl ReceivedMintEvent {
@@ -35,7 +35,7 @@ impl ReceivedMintEvent {
     }
 
     pub fn try_from_bytes(bytes: &[u8]) -> Result<Self> {
-        lcs::from_bytes(bytes).map_err(Into::into)
+        bcs::from_bytes(bytes).map_err(Into::into)
     }
 }
 

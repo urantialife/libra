@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
@@ -42,6 +42,15 @@ pub struct Options {
     )]
     pub out_dir: String,
 
+    /// If set, do not allow modules defined in source_files to shadow modules of the same id that
+    /// exist in dependencies. Compilation will fail in this case.
+    #[structopt(
+        name = "SOURCES_DO_NOT_SHADOW_DEPS",
+        short = cli::NO_SHADOW_SHORT,
+        long = cli::NO_SHADOW,
+    )]
+    pub no_shadow: bool,
+
     /// Save bytecode source map to disk
     #[structopt(
         name = "",
@@ -57,8 +66,17 @@ pub fn main() -> anyhow::Result<()> {
         dependencies,
         sender,
         out_dir,
+        no_shadow,
         emit_source_map,
     } = Options::from_args();
-    let (files, compiled_units) = move_lang::move_compile(&source_files, &dependencies, sender)?;
+
+    let interface_files_dir = format!("{}/generated_interface_files", out_dir);
+    let (files, compiled_units) = move_lang::move_compile_and_report(
+        &source_files,
+        &dependencies,
+        sender,
+        Some(interface_files_dir),
+        !no_shadow,
+    )?;
     move_lang::output_compiled_units(emit_source_map, files, compiled_units, &out_dir)
 }

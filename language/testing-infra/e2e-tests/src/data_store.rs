@@ -1,19 +1,19 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Support for mocking the Libra data store.
+//! Support for mocking the Diem data store.
 
 use crate::account::AccountData;
 use anyhow::Result;
 use compiled_stdlib::StdLibOptions;
-use libra_state_view::StateView;
-use libra_types::{
+use diem_state_view::StateView;
+use diem_types::{
     access_path::AccessPath,
     on_chain_config::ConfigStorage,
     transaction::ChangeSet,
     write_set::{WriteOp, WriteSet},
 };
-use libra_vm::data_cache::RemoteStorage;
+use diem_vm::data_cache::RemoteStorage;
 use move_core_types::{
     account_address::AccountAddress,
     language_storage::{ModuleId, StructTag},
@@ -21,7 +21,7 @@ use move_core_types::{
 use move_vm_runtime::data_cache::RemoteCache;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
-use vm::{errors::*, CompiledModule};
+use vm::errors::*;
 use vm_genesis::generate_genesis_change_set_for_testing;
 
 /// Dummy genesis ChangeSet for testing
@@ -83,12 +83,8 @@ impl FakeDataStore {
     /// Adds a [`CompiledModule`] to this data store.
     ///
     /// Does not do any sort of verification on the module.
-    pub fn add_module(&mut self, module_id: &ModuleId, module: &CompiledModule) {
+    pub fn add_module(&mut self, module_id: &ModuleId, blob: Vec<u8>) {
         let access_path = AccessPath::from(module_id);
-        let mut blob = vec![];
-        module
-            .serialize(&mut blob)
-            .expect("serializing this module should work");
         self.set(access_path, blob);
     }
 }

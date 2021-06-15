@@ -1,14 +1,14 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
 
 use anyhow::Context;
-use bytecode_verifier::{verify_module, verify_script, DependencyChecker};
+use bytecode_verifier::{dependencies, verify_module, verify_script};
 use compiled_stdlib::{stdlib_modules, StdLibOptions};
 use compiler::{util, Compiler};
+use diem_types::{access_path::AccessPath, account_address::AccountAddress, account_config};
 use ir_to_bytecode::parser::{parse_module, parse_script};
-use libra_types::{access_path::AccessPath, account_address::AccountAddress, account_config};
 use std::{
     convert::TryFrom,
     fs,
@@ -55,7 +55,7 @@ fn print_error_and_exit(verification_error: &VMError) -> ! {
 
 fn do_verify_module(module: CompiledModule, dependencies: &[CompiledModule]) -> CompiledModule {
     verify_module(&module).unwrap_or_else(|err| print_error_and_exit(&err));
-    if let Err(err) = DependencyChecker::verify_module(&module, dependencies) {
+    if let Err(err) = dependencies::verify_module(&module, dependencies) {
         print_error_and_exit(&err);
     }
     module
@@ -104,7 +104,7 @@ fn main() {
             script.get_external_deps()
         }
         .into_iter()
-        .map(|m| AccessPath::code_access_path(&m))
+        .map(AccessPath::code_access_path)
         .collect();
         println!(
             "{}",
@@ -130,7 +130,9 @@ fn main() {
         } else if args.no_stdlib {
             vec![]
         } else {
-            stdlib_modules(StdLibOptions::Compiled).to_vec()
+            stdlib_modules(StdLibOptions::Compiled)
+                .compiled_modules
+                .to_vec()
         }
     };
 
@@ -150,7 +152,7 @@ fn main() {
 
         if args.output_source_maps {
             let source_map_bytes =
-                lcs::to_bytes(&source_map).expect("Unable to serialize source maps for script");
+                bcs::to_bytes(&source_map).expect("Unable to serialize source maps for script");
             write_output(
                 &source_path.with_extension(source_map_extension),
                 &source_map_bytes,
@@ -173,7 +175,7 @@ fn main() {
 
         if args.output_source_maps {
             let source_map_bytes =
-                lcs::to_bytes(&source_map).expect("Unable to serialize source maps for module");
+                bcs::to_bytes(&source_map).expect("Unable to serialize source maps for module");
             write_output(
                 &source_path.with_extension(source_map_extension),
                 &source_map_bytes,

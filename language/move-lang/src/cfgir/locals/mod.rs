@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod state;
@@ -125,7 +125,7 @@ fn command(context: &mut Context, sp!(loc, cmd_): &Command) {
         }
         C::Abort(e) | C::IgnoreAndPop { exp: e, .. } | C::JumpIf { cond: e, .. } => exp(context, e),
 
-        C::Return(e) => {
+        C::Return { exp: e, .. } => {
             exp(context, e);
             let mut errors = Errors::new();
             for (local, state) in context.local_states.iter() {
@@ -169,7 +169,7 @@ fn command(context: &mut Context, sp!(loc, cmd_): &Command) {
             }
             errors.into_iter().for_each(|error| context.error(error))
         }
-        C::Jump(_) => (),
+        C::Jump { .. } => (),
         C::Break | C::Continue => panic!("ICE break/continue not translated to jumps"),
     }
 }

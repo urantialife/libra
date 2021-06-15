@@ -1,9 +1,9 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::shared::{ast_debug::*, Address, Identifier, Name, TName};
 use move_ir_types::location::*;
-use std::fmt;
+use std::{cmp::Ordering, fmt, hash::Hash};
 
 macro_rules! new_name {
     ($n:ident) => {
@@ -18,12 +18,12 @@ macro_rules! new_name {
                 (self.0.loc, self.0.value)
             }
 
-            fn clone_drop_loc(&self) -> (Loc, String) {
-                (self.0.loc, self.0.value.clone())
-            }
-
             fn add_loc(loc: Loc, key: String) -> Self {
                 $n(sp(loc, key))
+            }
+
+            fn borrow(&self) -> (&Loc, &String) {
+                (&self.0.loc, &self.0.value)
             }
         }
 
@@ -71,7 +71,7 @@ pub struct Script {
     pub specs: Vec<SpecBlock>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Clone, Eq)]
 pub enum Use {
     Module(ModuleIdent, Option<ModuleName>),
     Members(ModuleIdent, Vec<(Name, Option<Name>)>),
@@ -83,13 +83,14 @@ pub enum Use {
 
 new_name!(ModuleName);
 
-#[derive(Debug, Hash, Eq, PartialEq, Ord, PartialOrd, Clone)]
-pub struct ModuleIdent_ {
-    pub name: ModuleName,
-    pub address: Address,
+#[derive(Debug, Clone)]
+pub struct ModuleIdent {
+    pub locs: (
+        /* whole entity loc */ Loc,
+        /* module name loc */ Loc,
+    ),
+    pub value: (Address, String),
 }
-#[derive(Debug, Hash, Eq, PartialEq, Ord, PartialOrd, Clone)]
-pub struct ModuleIdent(pub Spanned<ModuleIdent_>);
 
 #[derive(Debug)]
 pub struct ModuleDefinition {
@@ -104,8 +105,21 @@ pub enum ModuleMember {
     Struct(StructDefinition),
     Spec(SpecBlock),
     Use(Use),
+    Friend(Friend),
     Constant(Constant),
 }
+
+//**************************************************************************************************
+// Friends
+//**************************************************************************************************
+
+#[derive(Debug, PartialEq)]
+pub enum Friend_ {
+    Module(ModuleName),
+    QualifiedModule(ModuleIdent),
+}
+
+pub type Friend = Spanned<Friend_>;
 
 //**************************************************************************************************
 // Structs
@@ -137,7 +151,7 @@ pub enum StructFields {
 
 new_name!(FunctionName);
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub struct FunctionSignature {
     pub type_parameters: Vec<(Name, Kind)>,
     pub parameters: Vec<(Var, Type)>,
@@ -147,10 +161,12 @@ pub struct FunctionSignature {
 #[derive(PartialEq, Debug, Clone)]
 pub enum FunctionVisibility {
     Public(Loc),
+    Script(Loc),
+    Friend(Loc),
     Internal,
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub enum FunctionBody_ {
     Defined(Sequence),
     Native,
@@ -191,7 +207,7 @@ pub struct Constant {
 
 // Specification block:
 //    SpecBlock = "spec" <SpecBlockTarget> "{" SpecBlockMember* "}"
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SpecBlock_ {
     pub target: SpecBlockTarget,
     pub uses: Vec<Use>,
@@ -200,7 +216,7 @@ pub struct SpecBlock_ {
 
 pub type SpecBlock = Spanned<SpecBlock_>;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SpecBlockTarget_ {
     Code,
     Module,
@@ -211,15 +227,21 @@ pub enum SpecBlockTarget_ {
 
 pub type SpecBlockTarget = Spanned<SpecBlockTarget_>;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PragmaProperty_ {
     pub name: Name,
-    pub value: Option<Value>,
+    pub value: Option<PragmaValue>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PragmaValue {
+    Literal(Value),
+    Ident(ModuleAccess),
 }
 
 pub type PragmaProperty = Spanned<PragmaProperty_>;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SpecApplyPattern_ {
     pub visibility: Option<FunctionVisibility>,
     pub name_pattern: Vec<SpecApplyFragment>,
@@ -228,7 +250,7 @@ pub struct SpecApplyPattern_ {
 
 pub type SpecApplyPattern = Spanned<SpecApplyPattern_>;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SpecApplyFragment_ {
     Wildcard,
     NamePart(Name),
@@ -236,7 +258,7 @@ pub enum SpecApplyFragment_ {
 
 pub type SpecApplyFragment = Spanned<SpecApplyFragment_>;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum SpecBlockMember_ {
     Condition {
@@ -262,6 +284,7 @@ pub enum SpecBlockMember_ {
         def: Exp,
     },
     Include {
+        properties: Vec<PragmaProperty>,
         exp: Exp,
     },
     Apply {
@@ -277,7 +300,7 @@ pub enum SpecBlockMember_ {
 pub type SpecBlockMember = Spanned<SpecBlockMember_>;
 
 // Specification condition kind.
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub enum SpecConditionKind {
     Assert,
     Assume,
@@ -286,6 +309,7 @@ pub enum SpecConditionKind {
     AbortsWith,
     SucceedsIf,
     Modifies,
+    Emits,
     Ensures,
     Requires,
     RequiresModule,
@@ -312,13 +336,13 @@ pub enum InvariantKind {
 
 // A ModuleAccess references a local or global name or something from a module,
 // either a struct type or a function.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ModuleAccess_ {
     // N
     Name(Name),
-    // M.S
+    // M::S
     ModuleAccess(ModuleName, Name),
-    // OxADDR.M.S
+    // OxADDR::M::S
     QualifiedModuleAccess(ModuleIdent, Name),
 }
 pub type ModuleAccess = Spanned<ModuleAccess_>;
@@ -336,7 +360,7 @@ pub enum Kind_ {
 }
 pub type Kind = Spanned<Kind_>;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Type_ {
     // N
     // N<t1, ... , tn>
@@ -360,7 +384,7 @@ pub type Type = Spanned<Type_>;
 
 new_name!(Var);
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Bind_ {
     // x
     Var(Var),
@@ -372,7 +396,10 @@ pub type Bind = Spanned<Bind_>;
 // b1, ..., bn
 pub type BindList = Spanned<Vec<Bind>>;
 
-#[derive(Debug, PartialEq)]
+pub type BindWithRange = Spanned<(Bind, Exp)>;
+pub type BindWithRangeList = Spanned<Vec<BindWithRange>>;
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Value_ {
     // 0x<hex representation up to 64 digits with padding 0s>
     Address(Address),
@@ -449,7 +476,14 @@ pub enum BinOp_ {
 }
 pub type BinOp = Spanned<BinOp_>;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Copy, Clone)]
+pub enum QuantKind_ {
+    Forall,
+    Exists,
+}
+pub type QuantKind = Spanned<QuantKind_>;
+
+#[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum Exp_ {
     Value(Value),
@@ -479,6 +513,14 @@ pub enum Exp_ {
     Block(Sequence),
     // fun (x1, ..., xn) e
     Lambda(BindList, Box<Exp>), // spec only
+    // forall/exists x1 : e1, ..., xn [{ t1, .., tk } *] [where cond]: en.
+    Quant(
+        QuantKind,
+        BindWithRangeList,
+        Vec<Vec<Exp>>,
+        Option<Box<Exp>>,
+        Box<Exp>,
+    ), // spec only
     // (e1, ..., en)
     ExpList(Vec<Exp>),
     // ()
@@ -530,7 +572,7 @@ pub type Exp = Spanned<Exp_>;
 // { e1; ... ; en; }
 // The Loc field holds the source location of the final semicolon, if there is one.
 pub type Sequence = (Vec<Use>, Vec<SequenceItem>, Option<Loc>, Box<Option<Exp>>);
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum SequenceItem_ {
     // e;
@@ -545,27 +587,50 @@ pub enum SequenceItem_ {
 pub type SequenceItem = Spanned<SequenceItem_>;
 
 //**************************************************************************************************
-// Loc
+// Traits
 //**************************************************************************************************
 
 impl TName for ModuleIdent {
     type Key = (Address, String);
     type Loc = (Loc, Loc);
+
     fn drop_loc(self) -> ((Loc, Loc), (Address, String)) {
-        let inner = self.0.value;
-        let (nloc, name_) = inner.name.drop_loc();
-        ((self.0.loc, nloc), (inner.address, name_))
+        (self.locs, self.value)
     }
-    fn clone_drop_loc(&self) -> ((Loc, Loc), (Address, String)) {
-        let (nloc, name_) = self.0.value.name.clone_drop_loc();
-        ((self.0.loc, nloc), (self.0.value.address, name_))
+
+    fn add_loc(locs: (Loc, Loc), value: (Address, String)) -> ModuleIdent {
+        ModuleIdent { locs, value }
     }
-    fn add_loc(locs: (Loc, Loc), key: (Address, String)) -> ModuleIdent {
-        let (iloc, nloc) = locs;
-        let (address, name_str) = key;
-        let name = ModuleName::add_loc(nloc, name_str);
-        let ident_ = ModuleIdent_ { address, name };
-        ModuleIdent(sp(iloc, ident_))
+
+    fn borrow(&self) -> (&(Loc, Loc), &(Address, String)) {
+        (&self.locs, &self.value)
+    }
+}
+
+// Hash, Eq, PartialEq, Ord, PartialOrd,
+impl PartialEq for ModuleIdent {
+    fn eq(&self, other: &ModuleIdent) -> bool {
+        self.value == other.value
+    }
+}
+
+impl Eq for ModuleIdent {}
+
+impl PartialOrd for ModuleIdent {
+    fn partial_cmp(&self, other: &ModuleIdent) -> Option<Ordering> {
+        self.value.partial_cmp(&other.value)
+    }
+}
+
+impl Ord for ModuleIdent {
+    fn cmp(&self, other: &ModuleIdent) -> Ordering {
+        self.value.cmp(&other.value)
+    }
+}
+
+impl Hash for ModuleIdent {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.value.hash(state)
     }
 }
 
@@ -573,9 +638,19 @@ impl TName for ModuleIdent {
 // Impl
 //**************************************************************************************************
 
+impl Definition {
+    pub fn file(&self) -> &'static str {
+        match self {
+            Definition::Module(m) => m.loc.file(),
+            Definition::Address(loc, _, _) => loc.file(),
+            Definition::Script(s) => s.loc.file(),
+        }
+    }
+}
+
 impl ModuleIdent {
     pub fn loc(&self) -> Loc {
-        self.0.loc
+        self.locs.0
     }
 }
 
@@ -584,6 +659,10 @@ impl ModuleName {
 }
 
 impl Var {
+    pub fn is_underscore(&self) -> bool {
+        self.0.value == "_"
+    }
+
     pub fn starts_with_underscore(&self) -> bool {
         self.0.value.starts_with('_')
     }
@@ -699,13 +778,30 @@ impl BinOp_ {
     }
 }
 
+impl FunctionVisibility {
+    pub const PUBLIC: &'static str = "public";
+    pub const SCRIPT: &'static str = "public(script)";
+    pub const FRIEND: &'static str = "public(friend)";
+    pub const INTERNAL: &'static str = "";
+}
+
 //**************************************************************************************************
 // Display
 //**************************************************************************************************
 
 impl fmt::Display for ModuleIdent {
     fn fmt(&self, f: &mut fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}::{}", self.0.value.address, &self.0.value.name)
+        write!(f, "{}::{}", self.value.0, &self.value.1)
+    }
+}
+
+impl fmt::Display for ModuleAccess_ {
+    fn fmt(&self, f: &mut fmt::Formatter) -> std::fmt::Result {
+        match self {
+            ModuleAccess_::Name(n) => write!(f, "{}", n),
+            ModuleAccess_::ModuleAccess(m, n) => write!(f, "{}::{}", m, n),
+            ModuleAccess_::QualifiedModuleAccess(m, n) => write!(f, "{}::{}", m, n),
+        }
     }
 }
 
@@ -718,6 +814,21 @@ impl fmt::Display for UnaryOp_ {
 impl fmt::Display for BinOp_ {
     fn fmt(&self, f: &mut fmt::Formatter) -> std::fmt::Result {
         write!(f, "{}", self.symbol())
+    }
+}
+
+impl fmt::Display for FunctionVisibility {
+    fn fmt(&self, f: &mut fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match &self {
+                FunctionVisibility::Public(_) => FunctionVisibility::PUBLIC,
+                FunctionVisibility::Script(_) => FunctionVisibility::SCRIPT,
+                FunctionVisibility::Friend(_) => FunctionVisibility::FRIEND,
+                FunctionVisibility::Internal => FunctionVisibility::INTERNAL,
+            }
+        )
     }
 }
 
@@ -805,6 +916,7 @@ impl AstDebug for ModuleMember {
             ModuleMember::Struct(s) => s.ast_debug(w),
             ModuleMember::Spec(s) => s.ast_debug(w),
             ModuleMember::Use(u) => u.ast_debug(w),
+            ModuleMember::Friend(f) => f.ast_debug(w),
             ModuleMember::Constant(c) => c.ast_debug(w),
         }
     }
@@ -829,6 +941,24 @@ impl AstDebug for Use {
                         }
                     })
                 })
+            }
+        }
+        w.write(";")
+    }
+}
+
+impl AstDebug for Friend {
+    fn ast_debug(&self, w: &mut AstWriter) {
+        let Friend {
+            loc: _loc,
+            value: friend,
+        } = self;
+        match friend {
+            Friend_::Module(m_name) => {
+                w.write(&format!("friend {}", m_name));
+            }
+            Friend_::QualifiedModule(m_id) => {
+                w.write(&format!("friend {}", m_id));
             }
         }
         w.write(";")
@@ -906,6 +1036,7 @@ impl AstDebug for SpecConditionKind {
             AbortsWith => w.write("aborts_with "),
             SucceedsIf => w.write("succeeds_if "),
             Modifies => w.write("modifies "),
+            Emits => w.write("emits "),
             Ensures => w.write("ensures "),
             Requires => w.write("requires "),
             RequiresModule => w.write("requires module "),
@@ -973,7 +1104,7 @@ impl AstDebug for SpecBlockMember_ {
                 w.write(&format!("let {} = ", name));
                 def.ast_debug(w);
             }
-            SpecBlockMember_::Include { exp } => {
+            SpecBlockMember_::Include { properties: _, exp } => {
                 w.write("include ");
                 exp.ast_debug(w);
             }
@@ -1036,7 +1167,10 @@ impl AstDebug for PragmaProperty_ {
         w.write(&self.name.value);
         if let Some(value) = &self.value {
             w.write(" = ");
-            value.ast_debug(w);
+            match value {
+                PragmaValue::Literal(l) => l.ast_debug(w),
+                PragmaValue::Ident(i) => i.ast_debug(w),
+            }
         }
     }
 }
@@ -1071,10 +1205,7 @@ impl AstDebug for Function {
 
 impl AstDebug for FunctionVisibility {
     fn ast_debug(&self, w: &mut AstWriter) {
-        match self {
-            FunctionVisibility::Internal => (),
-            FunctionVisibility::Public(_) => w.write("public "),
-        }
+        w.write(&format!("{} ", self))
     }
 }
 
@@ -1191,11 +1322,7 @@ impl AstDebug for Vec<Type> {
 
 impl AstDebug for ModuleAccess_ {
     fn ast_debug(&self, w: &mut AstWriter) {
-        w.write(&match self {
-            ModuleAccess_::Name(n) => format!("{}", n),
-            ModuleAccess_::ModuleAccess(m, n) => format!("{}::{}", m, n),
-            ModuleAccess_::QualifiedModuleAccess(m, n) => format!("{}::{}", m, n),
-        })
+        w.write(&format!("{}", self))
     }
 }
 
@@ -1310,6 +1437,18 @@ impl AstDebug for Exp_ {
                 w.write(" ");
                 e.ast_debug(w);
             }
+            E::Quant(kind, sp!(_, rs), trs, c_opt, e) => {
+                kind.ast_debug(w);
+                w.write(" ");
+                rs.ast_debug(w);
+                trs.ast_debug(w);
+                if let Some(c) = c_opt {
+                    w.write(" where ");
+                    c.ast_debug(w);
+                }
+                w.write(" : ");
+                e.ast_debug(w);
+            }
             E::ExpList(es) => {
                 w.write("(");
                 w.comma(es, |w, e| e.ast_debug(w));
@@ -1402,6 +1541,36 @@ impl AstDebug for UnaryOp_ {
     }
 }
 
+impl AstDebug for QuantKind_ {
+    fn ast_debug(&self, w: &mut AstWriter) {
+        match self {
+            QuantKind_::Forall => w.write("forall"),
+            QuantKind_::Exists => w.write("exists"),
+        }
+    }
+}
+
+impl AstDebug for Vec<BindWithRange> {
+    fn ast_debug(&self, w: &mut AstWriter) {
+        let parens = self.len() != 1;
+        if parens {
+            w.write("(");
+        }
+        w.comma(self, |w, b| b.ast_debug(w));
+        if parens {
+            w.write(")");
+        }
+    }
+}
+
+impl AstDebug for (Bind, Exp) {
+    fn ast_debug(&self, w: &mut AstWriter) {
+        self.0.ast_debug(w);
+        w.write(" in ");
+        self.1.ast_debug(w);
+    }
+}
+
 impl AstDebug for Value_ {
     fn ast_debug(&self, w: &mut AstWriter) {
         use Value_ as V;
@@ -1426,6 +1595,16 @@ impl AstDebug for Vec<Bind> {
         w.comma(self, |w, b| b.ast_debug(w));
         if parens {
             w.write(")");
+        }
+    }
+}
+
+impl AstDebug for Vec<Vec<Exp>> {
+    fn ast_debug(&self, w: &mut AstWriter) {
+        for trigger in self {
+            w.write("{");
+            w.comma(trigger, |w, b| b.ast_debug(w));
+            w.write("}");
         }
     }
 }

@@ -1,9 +1,9 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::constants;
-use libra_secure_time::{RealTimeService, TimeService};
-use libra_types::{
+use diem_time_service::{TimeService, TimeServiceTrait};
+use diem_types::{
     account_address::AccountAddress,
     chain_id::ChainId,
     transaction::{RawTransaction, Script},
@@ -23,7 +23,7 @@ pub fn build_raw_transaction(
         constants::MAX_GAS_AMOUNT,
         constants::GAS_UNIT_PRICE,
         constants::GAS_CURRENCY_CODE.to_owned(),
-        RealTimeService::new().now() + constants::TXN_EXPIRATION_SECS,
+        TimeService::real().now_secs() + constants::TXN_EXPIRATION_SECS,
         chain_id,
     )
 }

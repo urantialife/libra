@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
@@ -6,23 +6,35 @@ use crate::{
     NodeBatch, StaleNodeIndex, TreeReader, TreeUpdateBatch, TreeWriter,
 };
 use anyhow::{bail, ensure, Result};
-use libra_types::transaction::Version;
-use std::{
-    collections::{hash_map::Entry, BTreeSet, HashMap},
-    sync::RwLock,
-};
+use diem_infallible::RwLock;
+use diem_types::transaction::Version;
+use std::collections::{hash_map::Entry, BTreeSet, HashMap};
 
-#[derive(Default)]
-pub struct MockTreeStore(RwLock<(HashMap<NodeKey, Node>, BTreeSet<StaleNodeIndex>)>);
+pub struct MockTreeStore<V> {
+    data: RwLock<(HashMap<NodeKey, Node<V>>, BTreeSet<StaleNodeIndex>)>,
+    allow_overwrite: bool,
+}
 
-impl TreeReader for MockTreeStore {
-    fn get_node_option(&self, node_key: &NodeKey) -> Result<Option<Node>> {
-        Ok(self.0.read().unwrap().0.get(node_key).cloned())
+impl<V> Default for MockTreeStore<V> {
+    fn default() -> Self {
+        Self {
+            data: RwLock::new((HashMap::new(), BTreeSet::new())),
+            allow_overwrite: false,
+        }
+    }
+}
+
+impl<V> TreeReader<V> for MockTreeStore<V>
+where
+    V: crate::TestValue,
+{
+    fn get_node_option(&self, node_key: &NodeKey) -> Result<Option<Node<V>>> {
+        Ok(self.data.read().0.get(node_key).cloned())
     }
 
-    fn get_rightmost_leaf(&self) -> Result<Option<(NodeKey, LeafNode)>> {
-        let locked = self.0.read().unwrap();
-        let mut node_key_and_node: Option<(NodeKey, LeafNode)> = None;
+    fn get_rightmost_leaf(&self) -> Result<Option<(NodeKey, LeafNode<V>)>> {
+        let locked = self.data.read();
+        let mut node_key_and_node: Option<(NodeKey, LeafNode<V>)> = None;
 
         for (key, value) in locked.0.iter() {
             if let Node::Leaf(leaf_node) = value {
@@ -38,19 +50,35 @@ impl TreeReader for MockTreeStore {
     }
 }
 
-impl TreeWriter for MockTreeStore {
-    fn write_node_batch(&self, node_batch: &NodeBatch) -> Result<()> {
-        let mut locked = self.0.write().unwrap();
+impl<V> TreeWriter<V> for MockTreeStore<V>
+where
+    V: crate::TestValue,
+{
+    fn write_node_batch(&self, node_batch: &NodeBatch<V>) -> Result<()> {
+        let mut locked = self.data.write();
         for (node_key, node) in node_batch.clone() {
-            assert_eq!(locked.0.insert(node_key, node), None);
+            let replaced = locked.0.insert(node_key, node);
+            if !self.allow_overwrite {
+                assert_eq!(replaced, None);
+            }
         }
         Ok(())
     }
 }
 
-impl MockTreeStore {
-    pub fn put_node(&self, node_key: NodeKey, node: Node) -> Result<()> {
-        match self.0.write().unwrap().0.entry(node_key) {
+impl<V> MockTreeStore<V>
+where
+    V: crate::TestValue,
+{
+    pub fn new(allow_overwrite: bool) -> Self {
+        Self {
+            allow_overwrite,
+            ..Default::default()
+        }
+    }
+
+    pub fn put_node(&self, node_key: NodeKey, node: Node<V>) -> Result<()> {
+        match self.data.write().0.entry(node_key) {
             Entry::Occupied(o) => bail!("Key {:?} exists.", o.key()),
             Entry::Vacant(v) => {
                 v.insert(node);
@@ -60,12 +88,12 @@ impl MockTreeStore {
     }
 
     fn put_stale_node_index(&self, index: StaleNodeIndex) -> Result<()> {
-        let is_new_entry = self.0.write().unwrap().1.insert(index);
+        let is_new_entry = self.data.write().1.insert(index);
         ensure!(is_new_entry, "Duplicated retire log.");
         Ok(())
     }
 
-    pub fn write_tree_update_batch(&self, batch: TreeUpdateBatch) -> Result<()> {
+    pub fn write_tree_update_batch(&self, batch: TreeUpdateBatch<V>) -> Result<()> {
         batch
             .node_batch
             .into_iter()
@@ -80,7 +108,7 @@ impl MockTreeStore {
     }
 
     pub fn purge_stale_nodes(&self, least_readable_version: Version) -> Result<()> {
-        let mut wlocked = self.0.write().unwrap();
+        let mut wlocked = self.data.write();
 
         // Only records retired before or at `least_readable_version` can be purged in order
         // to keep that version still readable.
@@ -101,6 +129,6 @@ impl MockTreeStore {
     }
 
     pub fn num_nodes(&self) -> usize {
-        self.0.read().unwrap().0.len()
+        self.data.read().0.len()
     }
 }

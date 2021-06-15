@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::transaction::transaction_argument::TransactionArgument;
@@ -48,6 +48,7 @@ impl fmt::Debug for Script {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Script")
             .field("code", &hex::encode(&self.code))
+            .field("ty_args", &self.ty_args)
             .field("args", &self.args)
             .finish()
     }

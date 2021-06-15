@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
@@ -9,15 +9,14 @@ use crate::{
     util::mock_time_service::SimulatedTimeService,
 };
 use consensus_types::{block::Block, quorum_cert::QuorumCert};
+use diem_config::config::NodeConfig;
+use diem_crypto::{ed25519::Ed25519PrivateKey, Uniform};
+use diem_types::validator_signer::ValidatorSigner;
 use execution_correctness::{ExecutionCorrectness, ExecutionCorrectnessManager};
 use executor_test_helpers::start_storage_service;
 use executor_types::ExecutedTrees;
 use futures::channel::mpsc;
-use libra_config::config::{NodeConfig, PersistableConfig};
-use libra_crypto::{ed25519::Ed25519PrivateKey, Uniform};
-use libra_temppath::TempPath;
-use libra_types::validator_signer::ValidatorSigner;
-use state_synchronizer::StateSyncClient;
+use state_sync::client::StateSyncClient;
 use std::sync::Arc;
 use storage_interface::DbReader;
 
@@ -65,10 +64,11 @@ fn build_inserter(
     lec_client: Box<dyn ExecutionCorrectness + Send + Sync>,
 ) -> TreeInserter {
     let (coordinator_sender, _coordinator_receiver) = mpsc::unbounded();
+    let client_commit_timeout_ms = config.state_sync.client_commit_timeout_ms;
 
     let state_computer = Arc::new(ExecutionProxy::new(
         lec_client,
-        Arc::new(StateSyncClient::new(coordinator_sender)),
+        StateSyncClient::new(coordinator_sender, client_commit_timeout_ms),
     ));
 
     TreeInserter::new_with_store(
@@ -89,13 +89,7 @@ fn build_inserter(
 #[test]
 fn test_executor_restart() {
     // Start storage service
-    let (mut config, _handle, db) = start_storage_service();
-
-    // Store the config
-    let config_path = TempPath::new();
-    config_path.create_as_file().unwrap();
-    config.save_config(&config_path).unwrap();
-
+    let (config, _handle, db) = start_storage_service();
     let execution_correctness_manager = ExecutionCorrectnessManager::new(&config);
 
     let (initial_data, qc) = get_initial_data_and_qc(&*db);
@@ -122,7 +116,6 @@ fn test_executor_restart() {
     // Crash LEC.
     drop(execution_correctness_manager);
 
-    config = NodeConfig::load(&config_path).unwrap();
     // Restart LEC and make sure we can continue to append to the current tree.
     let _execution_correctness_manager = ExecutionCorrectnessManager::new(&config);
 
@@ -137,12 +130,7 @@ fn test_executor_restart() {
 #[test]
 fn test_block_store_restart() {
     // Start storage service
-    let (mut config, _handle, db) = start_storage_service();
-
-    // Store the config
-    let config_path = TempPath::new();
-    config_path.create_as_file().unwrap();
-    config.save_config(&config_path).unwrap();
+    let (config, _handle, db) = start_storage_service();
 
     let execution_correctness_manager = ExecutionCorrectnessManager::new(&config);
 
@@ -170,7 +158,6 @@ fn test_block_store_restart() {
 
     // Restart block_store
     {
-        config = NodeConfig::load(&config_path).unwrap();
         let (initial_data, qc) = get_initial_data_and_qc(&*db);
         let mut inserter = build_inserter(
             &config,

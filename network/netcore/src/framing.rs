@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use bytes::BytesMut;
@@ -48,7 +48,6 @@ where
     let len = buf
         .len()
         .try_into()
-        // TODO Maybe use our own Error Type?
         .map_err(|_e| std::io::Error::new(std::io::ErrorKind::Other, "Too big"))?;
     write_u16frame_len(&mut stream, len).await?;
     stream.write_all(buf).await?;
@@ -104,14 +103,12 @@ mod test {
     }
 
     #[test]
-    fn write_u16frame_len_eof() -> Result<()> {
+    fn write_u16frame_len_eof() {
         let (mut a, b) = MemorySocket::new_pair();
         drop(b);
 
         let result = block_on(a.write_all(&[42]));
         assert!(result.is_err(), true);
-
-        Ok(())
     }
 
     #[test]
@@ -151,7 +148,7 @@ mod test {
     }
 
     #[test]
-    fn write_large_u16frame() -> Result<()> {
+    fn write_large_u16frame() {
         let (mut a, _b) = MemorySocket::new_pair();
 
         let mut buf = Vec::new();
@@ -159,7 +156,5 @@ mod test {
 
         let result = block_on(write_u16frame(&mut a, &buf));
         assert!(result.is_err(), true);
-
-        Ok(())
     }
 }

@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{context::*, remove_fallthrough_jumps};
@@ -19,10 +19,13 @@ use crate::{
     shared::{unique_map::UniqueMap, *},
 };
 use bytecode_source_map::source_map::SourceMap;
-use libra_types::account_address::AccountAddress as LibraAddress;
+use diem_types::account_address::AccountAddress as DiemAddress;
 use move_ir_types::{ast as IR, location::*};
 use move_vm::file_format as F;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    iter::FromIterator,
+};
 
 type CollectedInfos = UniqueMap<FunctionName, CollectedInfo>;
 type CollectedInfo = (
@@ -39,26 +42,31 @@ pub fn program(prog: G::Program) -> Result<Vec<CompiledUnit>, Errors> {
     let mut errors = vec![];
     let orderings = prog
         .modules
-        .iter()
+        .key_cloned_iter()
         .map(|(m, mdef)| (m, mdef.dependency_order))
         .collect();
     let sdecls = prog
         .modules
-        .iter()
+        .key_cloned_iter()
         .flat_map(|(m, mdef)| {
-            mdef.structs.iter().map(move |(s, sdef)| {
+            mdef.structs.key_cloned_iter().map(move |(s, sdef)| {
                 let key = (m.clone(), s);
                 let is_nominal_resource = sdef.resource_opt.is_some();
-                let kinds = type_parameters(sdef.type_parameters.clone());
-                (key, (is_nominal_resource, kinds))
+                let abilities = BTreeSet::from_iter(if is_nominal_resource {
+                    vec![IR::Ability::Key, IR::Ability::Store]
+                } else {
+                    vec![IR::Ability::Copy, IR::Ability::Drop, IR::Ability::Store]
+                });
+                let kinds = type_parameters(sdef.type_parameters.clone(), true);
+                (key, (abilities, kinds))
             })
         })
         .collect();
     let fdecls = prog
         .modules
-        .iter()
+        .key_cloned_iter()
         .flat_map(|(m, mdef)| {
-            mdef.functions.iter().map(move |(f, fdef)| {
+            mdef.functions.key_cloned_iter().map(move |(f, fdef)| {
                 let key = (m.clone(), f);
                 let seen = seen_structs(&fdef.signature);
                 let sig = function_signature(&mut Context::new(None), fdef.signature.clone());
@@ -107,7 +115,13 @@ fn module(
     ident: ModuleIdent,
     mdef: G::ModuleDefinition,
     dependency_orderings: &HashMap<ModuleIdent, usize>,
-    struct_declarations: &HashMap<(ModuleIdent, StructName), (bool, Vec<(IR::TypeVar, IR::Kind)>)>,
+    struct_declarations: &HashMap<
+        (ModuleIdent, StructName),
+        (
+            BTreeSet<IR::Ability>,
+            Vec<(IR::TypeVar, BTreeSet<IR::Ability>)>,
+        ),
+    >,
     function_declarations: &HashMap<
         (ModuleIdent, FunctionName),
         (BTreeSet<(ModuleIdent, StructName)>, IR::FunctionSignature),
@@ -136,15 +150,17 @@ fn module(
         })
         .collect();
 
-    let addr = LibraAddress::new(ident.0.value.address.to_u8());
-    let mname = ident.0.value.name.clone();
+    let addr = DiemAddress::new(ident.value.0.to_u8());
+    let mname = ident.value.1.clone();
     let (imports, explicit_dependency_declarations) = context.materialize(
         dependency_orderings,
         struct_declarations,
         function_declarations,
     );
     let ir_module = IR::ModuleDefinition {
-        name: IR::ModuleName::new(mname.0.value),
+        name: IR::ModuleName::new(mname),
+        // TODO: add friends here
+        friends: vec![],
         imports,
         explicit_dependency_declarations,
         structs,
@@ -170,7 +186,13 @@ fn script(
     name: FunctionName,
     fdef: G::Function,
     dependency_orderings: &HashMap<ModuleIdent, usize>,
-    struct_declarations: &HashMap<(ModuleIdent, StructName), (bool, Vec<(IR::TypeVar, IR::Kind)>)>,
+    struct_declarations: &HashMap<
+        (ModuleIdent, StructName),
+        (
+            BTreeSet<IR::Ability>,
+            Vec<(IR::TypeVar, BTreeSet<IR::Ability>)>,
+        ),
+    >,
     function_declarations: &HashMap<
         (ModuleIdent, FunctionName),
         (BTreeSet<(ModuleIdent, StructName)>, IR::FunctionSignature),
@@ -336,13 +358,18 @@ fn struct_def(
     let loc = s.loc();
     let name = context.struct_definition_name(m, s);
     let is_nominal_resource = resource_opt.is_some();
-    let type_formals = type_parameters(tys);
+    let abilities = BTreeSet::from_iter(if is_nominal_resource {
+        vec![IR::Ability::Key, IR::Ability::Store]
+    } else {
+        vec![IR::Ability::Copy, IR::Ability::Drop, IR::Ability::Store]
+    });
+    let type_formals = type_parameters(tys, true);
     let fields = struct_fields(context, loc, fields);
     sp(
         loc,
         IR::StructDefinition_ {
             name,
-            is_nominal_resource,
+            abilities,
             type_formals,
             fields,
             invariants: vec![],
@@ -449,6 +476,8 @@ fn function(
 fn visibility(v: FunctionVisibility) -> IR::FunctionVisibility {
     match v {
         FunctionVisibility::Public(_) => IR::FunctionVisibility::Public,
+        FunctionVisibility::Script(_) => IR::FunctionVisibility::Script,
+        FunctionVisibility::Friend(_) => IR::FunctionVisibility::Friend,
         FunctionVisibility::Internal => IR::FunctionVisibility::Internal,
     }
 }
@@ -460,7 +489,7 @@ fn function_signature(context: &mut Context, sig: H::FunctionSignature) -> IR::F
         .into_iter()
         .map(|(v, st)| (var(v), single_type(context, st)))
         .collect();
-    let type_parameters = type_parameters(sig.type_parameters);
+    let type_parameters = type_parameters(sig.type_parameters, false);
     IR::FunctionSignature {
         return_type,
         formals,
@@ -605,19 +634,47 @@ fn struct_definition_name_base(
 // Types
 //**************************************************************************************************
 
-fn kind(sp!(_, k_): &Kind) -> IR::Kind {
+// fn kind(sp!(_, k_): &Kind) -> IR::Kind {
+//     use Kind_ as GK;
+//     use IR::Kind as IRK;
+//     match k_ {
+//         GK::Unknown => IRK::All,
+//         GK::Resource => IRK::Resource,
+//         GK::Affine | GK::Copyable => IRK::Copyable,
+//     }
+// }
+
+fn kind(sp!(_, k_): &Kind, struct_type_parameters: bool) -> BTreeSet<IR::Ability> {
     use Kind_ as GK;
-    use IR::Kind as IRK;
+    use IR::Ability as IRA;
+    let mut set = BTreeSet::new();
     match k_ {
-        GK::Unknown => IRK::All,
-        GK::Resource => IRK::Resource,
-        GK::Affine | GK::Copyable => IRK::Copyable,
+        GK::Unknown => (),
+        GK::Resource => {
+            set.insert(IRA::Key);
+        }
+        GK::Affine | GK::Copyable => {
+            set.insert(IRA::Drop);
+            set.insert(IRA::Copy);
+        }
+    };
+    if !struct_type_parameters {
+        set.insert(IRA::Store);
     }
+    set
 }
 
-fn type_parameters(tps: Vec<TParam>) -> Vec<(IR::TypeVar, IR::Kind)> {
+fn type_parameters(
+    tps: Vec<TParam>,
+    struct_type_parameters: bool,
+) -> Vec<(IR::TypeVar, BTreeSet<IR::Ability>)> {
     tps.into_iter()
-        .map(|tp| (type_var(tp.user_specified_name), kind(&tp.kind)))
+        .map(|tp| {
+            (
+                type_var(tp.user_specified_name),
+                kind(&tp.kind, struct_type_parameters),
+            )
+        })
         .collect()
 }
 
@@ -702,7 +759,7 @@ fn command(context: &mut Context, code: &mut IR::BytecodeBlock, sp!(loc, cmd_): 
             exp_(context, code, ecode);
             code.push(sp(loc, B::Abort));
         }
-        C::Return(e) => {
+        C::Return { exp: e, .. } => {
             exp_(context, code, e);
             code.push(sp(loc, B::Ret));
         }
@@ -712,7 +769,7 @@ fn command(context: &mut Context, code: &mut IR::BytecodeBlock, sp!(loc, cmd_): 
                 code.push(sp(loc, B::Pop));
             }
         }
-        C::Jump(lbl) => code.push(sp(loc, B::Branch(label(lbl)))),
+        C::Jump { target, .. } => code.push(sp(loc, B::Branch(label(target)))),
         C::JumpIf {
             cond,
             if_true,
@@ -789,7 +846,7 @@ fn exp_(context: &mut Context, code: &mut IR::BytecodeBlock, e: H::Exp) {
             code.push(sp(
                 loc,
                 match v.value {
-                    V::Address(a) => B::LdAddr(LibraAddress::new(a.to_u8())),
+                    V::Address(a) => B::LdAddr(DiemAddress::new(a.to_u8())),
                     V::Bytearray(bytes) => B::LdByteArray(bytes),
                     V::U8(u) => B::LdU8(u),
                     V::U64(u) => B::LdU64(u),
@@ -815,6 +872,7 @@ fn exp_(context: &mut Context, code: &mut IR::BytecodeBlock, e: H::Exp) {
             exp(context, code, mcall.arguments);
             module_call(
                 context,
+                loc,
                 code,
                 mcall.module,
                 mcall.name,
@@ -912,13 +970,13 @@ fn exp_(context: &mut Context, code: &mut IR::BytecodeBlock, e: H::Exp) {
 
 fn module_call(
     context: &mut Context,
+    loc: Loc,
     code: &mut IR::BytecodeBlock,
     mident: ModuleIdent,
     fname: FunctionName,
     tys: Vec<H::BaseType>,
 ) {
     use IR::Bytecode_ as B;
-    let loc = fname.loc();
     let (m, n) = context.qualified_function_name(&mident, fname);
     code.push(sp(loc, B::Call(m, n, base_types(context, tys))))
 }

@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
@@ -6,13 +6,13 @@ use crate::{
     common_transactions::{empty_txn, EMPTY_SCRIPT},
     gas_costs,
 };
-use libra_crypto::{
+use diem_crypto::{
     ed25519::{self, Ed25519PrivateKey, Ed25519PublicKey},
     test_utils::KeyPair,
 };
-use libra_proptest_helpers::Index;
-use libra_types::{
-    account_config::LBR_NAME,
+use diem_proptest_helpers::Index;
+use diem_types::{
+    account_config::XUS_NAME,
     transaction::{Script, SignedTransaction, TransactionStatus},
     vm_status::StatusCode,
 };
@@ -50,7 +50,7 @@ impl AUTransactionGen for SequenceNumberMismatchGen {
             seq,
             gas_costs::TXN_RESERVED,
             0,
-            LBR_NAME.to_string(),
+            XUS_NAME.to_string(),
         );
 
         (
@@ -91,13 +91,18 @@ impl AUTransactionGen for InsufficientBalanceGen {
             sender.sequence_number,
             max_gas_unit,
             self.gas_unit_price,
-            LBR_NAME.to_string(),
+            XUS_NAME.to_string(),
         );
 
         // TODO: Move such config to AccountUniverse
         let default_constants = GasConstants::default();
         let raw_bytes_len = AbstractMemorySize::new(txn.raw_txn_bytes_len() as GasCarrier);
-        let min_cost = calculate_intrinsic_gas(raw_bytes_len, &GasConstants::default()).get();
+        let min_cost = GasConstants::default()
+            .to_external_units(calculate_intrinsic_gas(
+                raw_bytes_len,
+                &GasConstants::default(),
+            ))
+            .get();
 
         (
             txn,

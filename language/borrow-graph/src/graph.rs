@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
@@ -34,7 +34,11 @@ impl<Loc: Copy, Lbl: Clone + Ord> BorrowGraph<Loc, Lbl> {
     /// Adds a new reference to the borrow graph
     /// Fails if the id is already in use
     pub fn new_ref(&mut self, id: RefID, mutable: bool) {
-        assert!(self.0.insert(id, Ref::new(mutable)).is_none(), "{}", id.0)
+        assert!(
+            self.0.insert(id, Ref::new(mutable)).is_none(),
+            "ref {} exists",
+            id.0
+        )
     }
 
     /// Return the references borrowing the `id` reference

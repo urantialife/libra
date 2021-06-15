@@ -1,17 +1,16 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 // The config holds the options that define the testing environment.
 // A config entry starts with "//!", differentiating it from a directive.
 
-use crate::{common::strip, errors::*, genesis_accounts::make_genesis_accounts};
+use crate::{errors::*, genesis_accounts::make_genesis_accounts};
+use diem_crypto::PrivateKey;
+use diem_types::account_config;
 use language_e2e_tests::{
     account::{Account, AccountData, AccountRoleSpecifier},
     keygen::KeyGen,
 };
-use libra_config::generator;
-use libra_crypto::PrivateKey;
-use libra_types::account_config;
 use move_core_types::identifier::Identifier;
 use once_cell::sync::Lazy;
 use std::{
@@ -21,7 +20,7 @@ use std::{
 
 static DEFAULT_BALANCE: Lazy<Balance> = Lazy::new(|| Balance {
     amount: 1_000_000,
-    currency_code: account_config::from_currency_code_string(account_config::LBR_NAME).unwrap(),
+    currency_code: account_config::from_currency_code_string(account_config::XUS_NAME).unwrap(),
 });
 
 #[derive(Debug)]
@@ -43,9 +42,9 @@ impl FromStr for Balance {
 
     fn from_str(s: &str) -> Result<Self> {
         // TODO: Try to get this from the on-chain config?
-        let coin_types = vec!["LBR", "Coin1", "Coin2"];
+        let coin_types = vec!["XDX", "XUS"];
         let mut coin_type: Vec<&str> = coin_types.into_iter().filter(|x| s.ends_with(x)).collect();
-        let currency_code = coin_type.pop().unwrap_or("LBR");
+        let currency_code = coin_type.pop().unwrap_or("XUS");
         if !coin_type.is_empty() {
             return Err(ErrorKind::Other(
                 "Multiple coin types supplied for account. Accounts are single currency"
@@ -122,11 +121,12 @@ impl FromStr for Entry {
 
     fn from_str(s: &str) -> Result<Self> {
         let s = s.split_whitespace().collect::<String>();
-        let s = strip(&s, "//!")
+        let s = &s
+            .strip_prefix("//!")
             .ok_or_else(|| ErrorKind::Other("txn config entry must start with //!".to_string()))?
             .trim_start();
 
-        if let Some(s) = strip(s, "account:") {
+        if let Some(s) = s.strip_prefix("account:") {
             let v: Vec<_> = s
                 .split(|c: char| c == ',' || c.is_whitespace())
                 .filter(|s| !s.is_empty())
@@ -165,10 +165,11 @@ pub struct Config {
     pub addresses: BTreeMap<String, Account>,
     /// The validator set after genesis
     pub validator_accounts: usize,
+    pub exp_mode: bool,
 }
 
 impl Config {
-    pub fn build(entries: &[Entry]) -> Result<Self> {
+    pub fn build(entries: &[Entry], exp_mode: bool) -> Result<Self> {
         let mut accounts = BTreeMap::new();
         let mut addresses = BTreeMap::new();
         let mut validator_accounts = entries.iter().filter(|entry| entry.is_validator()).count();
@@ -176,23 +177,10 @@ impl Config {
 
         // generate a validator set with |validator_accounts| validators
         let validators = if validator_accounts > 0 {
-            let mut swarm = generator::validator_swarm_for_testing(validator_accounts);
-            swarm
-                .nodes
-                .iter_mut()
-                .map(|c| {
-                    let account = c.consensus.safety_rules.test.as_ref().unwrap().author;
-                    let key = c
-                        .test
-                        .as_ref()
-                        .unwrap()
-                        .owner_key
-                        .as_ref()
-                        .unwrap()
-                        .private_key();
-                    (account, key)
-                })
-                .collect::<Vec<_>>()
+            vm_genesis::Validator::new_set(Some(validator_accounts))
+                .into_iter()
+                .map(|v| (v.owner_address, v.key))
+                .collect()
         } else {
             vec![]
         };
@@ -281,6 +269,7 @@ impl Config {
             addresses,
             genesis_accounts: make_genesis_accounts(),
             validator_accounts: total_validator_accounts,
+            exp_mode,
         })
     }
 

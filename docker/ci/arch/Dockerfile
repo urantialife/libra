@@ -1,19 +1,26 @@
-#while using circle we'll use circle's base image.
-FROM archlinux:20200705@sha256:ce7ccce2c458b875f66a0e33d492ccc2f5495dbf21a7fc9acd261f8f980d4fd5 AS setup_ci_arch
+# while using circle we'll use circle's base image.
+FROM archlinux:base-devel-20210307.0.16708@sha256:16b8dc787a0ad6b8747bade636634db598a05adfeb6a625f2ca124b3c7b5cf86 AS setup_ci_arch
 
-WORKDIR /libra
-COPY rust-toolchain /libra/rust-toolchain
-COPY cargo-toolchain /libra/cargo-toolchain
-COPY scripts/dev_setup.sh /libra/scripts/dev_setup.sh
+WORKDIR /diem
+COPY rust-toolchain /diem/rust-toolchain
+COPY cargo-toolchain /diem/cargo-toolchain
+COPY scripts/dev_setup.sh /diem/scripts/dev_setup.sh
 
-#Batch mode and all operations tooling
-RUN scripts/dev_setup.sh -o -b -p && pacman -Scc --noconfirm
+# WORKAROUND for glibc 2.33 and old Docker
+# See https://github.com/actions/virtual-environments/issues/2658
+# Thanks to https://github.com/lxqt/lxqt-panel/pull/1562
+RUN patched_glibc=glibc-linux4-2.33-4-x86_64.pkg.tar.zst && \
+    curl -LO "https://repo.archlinuxcn.org/x86_64/$patched_glibc" && \
+    bsdtar -C / -xvf "$patched_glibc"
+
+# Batch mode and all operations tooling
+RUN scripts/dev_setup.sh -t -o -y -b -p && pacman -Scc --noconfirm
 ENV PATH "/root/.cargo/bin:/root/bin/:$PATH"
 
 FROM setup_ci_arch as tested_ci_arch
 
-#Compile a small rust tool?  But we already have in dev_setup (sccache/grcov)...?
-#Test that all commands we need are installed and on the PATH
+# Compile a small rust tool?  But we already have in dev_setup (sccache/grcov)...?
+# Test that all commands we need are installed and on the PATH
 RUN [ -x "$(command -v shellcheck)" ] \
     && [ -x "$(command -v hadolint)" ] \
     && [ -x "$(command -v vault)" ] \
@@ -25,10 +32,12 @@ RUN [ -x "$(command -v shellcheck)" ] \
     && [ -x "$(command -v grcov)" ] \
     && [ -x "$(command -v helm)" ] \
     && [ -x "$(command -v aws)" ] \
-    && [ -x "$(xargs rustup which cargo --toolchain < /libra/rust-toolchain )" ] \
-    && [ -x "$(xargs rustup which cargo --toolchain < /libra/cargo-toolchain)" ]
+    && [ -x "$(command -v z3)" ] \
+    && [ -x "$(command -v "$HOME/.dotnet/tools/boogie")" ] \
+    && [ -x "$(xargs rustup which cargo --toolchain < /diem/rust-toolchain )" ] \
+    && [ -x "$(xargs rustup which cargo --toolchain < /diem/cargo-toolchain)" ]
 
-#should be a no-op
+# should be a no-op
 RUN scripts/dev_setup.sh -b -p
 
 FROM setup_ci_arch as build_environment_arch

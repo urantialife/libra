@@ -1,30 +1,35 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::ConfigurationChangeListener;
-use channel::libra_channel;
-use libra_config::config::RoleType;
-use libra_network_address_encryption::Encryptor;
-use libra_types::on_chain_config::OnChainConfigPayload;
+use channel::diem_channel;
+use diem_config::network_id::NetworkContext;
+use diem_crypto::x25519::PublicKey;
+use diem_network_address_encryption::Encryptor;
+use diem_types::on_chain_config::OnChainConfigPayload;
 use network::connectivity_manager::ConnectivityRequest;
+use std::sync::Arc;
 use tokio::runtime::Handle;
 
 struct ConfigurationChangeListenerConfig {
-    role: RoleType,
+    network_context: Arc<NetworkContext>,
+    expected_pubkey: PublicKey,
     encryptor: Encryptor,
     conn_mgr_reqs_tx: channel::Sender<ConnectivityRequest>,
-    reconfig_events: libra_channel::Receiver<(), OnChainConfigPayload>,
+    reconfig_events: diem_channel::Receiver<(), OnChainConfigPayload>,
 }
 
 impl ConfigurationChangeListenerConfig {
     fn new(
-        role: RoleType,
+        network_context: Arc<NetworkContext>,
+        expected_pubkey: PublicKey,
         encryptor: Encryptor,
         conn_mgr_reqs_tx: channel::Sender<ConnectivityRequest>,
-        reconfig_events: libra_channel::Receiver<(), OnChainConfigPayload>,
+        reconfig_events: diem_channel::Receiver<(), OnChainConfigPayload>,
     ) -> Self {
         Self {
-            role,
+            network_context,
+            expected_pubkey,
             encryptor,
             conn_mgr_reqs_tx,
             reconfig_events,
@@ -47,14 +52,16 @@ pub struct ConfigurationChangeListenerBuilder {
 
 impl ConfigurationChangeListenerBuilder {
     pub fn create(
-        role: RoleType,
+        network_context: Arc<NetworkContext>,
+        expected_pubkey: PublicKey,
         encryptor: Encryptor,
         conn_mgr_reqs_tx: channel::Sender<ConnectivityRequest>,
-        reconfig_events: libra_channel::Receiver<(), OnChainConfigPayload>,
+        reconfig_events: diem_channel::Receiver<(), OnChainConfigPayload>,
     ) -> ConfigurationChangeListenerBuilder {
         Self {
             config: Some(ConfigurationChangeListenerConfig::new(
-                role,
+                network_context,
+                expected_pubkey,
                 encryptor,
                 conn_mgr_reqs_tx,
                 reconfig_events,
@@ -69,7 +76,8 @@ impl ConfigurationChangeListenerBuilder {
         self.state = State::BUILT;
         let config = self.config.take().expect("Listener must be configured");
         self.listener = Some(ConfigurationChangeListener::new(
-            config.role,
+            config.network_context,
+            config.expected_pubkey,
             config.encryptor,
             config.conn_mgr_reqs_tx,
             config.reconfig_events,

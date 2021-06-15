@@ -1,24 +1,28 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 //! Module contains RPC method handlers for Full Node JSON-RPC interface
 use crate::{
     errors::JsonRpcError,
+    util::{transaction_data_view_from_transaction, vm_status_view_from_kept_vm_status},
     views::{
-        AccountStateWithProofView, AccountView, BlockMetadata, CurrencyInfoView, EventView,
-        StateProofView, TransactionView,
+        AccountStateWithProofView, AccountView, BytesView, CurrencyInfoView, EventView,
+        EventWithProofView, MetadataView, StateProofView, TransactionView, TransactionsProofsView,
+        TransactionsWithProofsView,
     },
 };
 use anyhow::{ensure, format_err, Error, Result};
 use core::future::Future;
-use futures::{channel::oneshot, SinkExt};
-use libra_config::config::RoleType;
-use libra_crypto::hash::CryptoHash;
-use libra_mempool::MempoolClientSender;
-use libra_trace::prelude::*;
-use libra_types::{
+use diem_config::config::RoleType;
+use diem_crypto::hash::CryptoHash;
+use diem_mempool::MempoolClientSender;
+use diem_trace::prelude::*;
+use diem_types::{
     account_address::AccountAddress,
-    account_config::{from_currency_code_string, libra_root_address, AccountResource},
+    account_config::{
+        diem_root_address, from_currency_code_string, resources::dual_attestation::Limit,
+        AccountResource,
+    },
     account_state::AccountState,
     chain_id::ChainId,
     event::EventKey,
@@ -26,10 +30,18 @@ use libra_types::{
     mempool_status::MempoolStatusCode,
     transaction::SignedTransaction,
 };
+use fail::fail_point;
+use futures::{channel::oneshot, SinkExt};
 use network::counters;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use std::{cmp::min, collections::HashMap, convert::TryFrom, pin::Pin, sync::Arc};
+use std::{
+    cmp::min,
+    collections::HashMap,
+    convert::{TryFrom, TryInto},
+    pin::Pin,
+    sync::Arc,
+};
 use storage_interface::{DbReader, Order};
 
 #[derive(Clone)]
@@ -61,7 +73,29 @@ impl JsonRpcService {
         }
     }
 
+    fn get_account_state(
+        &self,
+        address: AccountAddress,
+        version: u64,
+    ) -> Result<Option<AccountState>> {
+        if let Some(blob) = self
+            .db
+            .get_account_state_with_proof_by_version(address, version)?
+            .0
+        {
+            Ok(Some(AccountState::try_from(&blob)?))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn get_latest_ledger_info(&self) -> Result<LedgerInfoWithSignatures> {
+        fail_point!("jsonrpc::get_latest_ledger_info", |_| {
+            Err(anyhow::anyhow!(
+                "Injected error for get latest ledger info error"
+            ))
+        });
+
         self.db.get_latest_ledger_info()
     }
 
@@ -95,6 +129,7 @@ type RpcHandler =
 pub(crate) type RpcRegistry = HashMap<String, RpcHandler>;
 
 pub(crate) struct JsonRpcRequest {
+    pub trace_id: String,
     pub params: Vec<Value>,
     pub ledger_info: LedgerInfoWithSignatures,
 }
@@ -120,7 +155,7 @@ impl JsonRpcRequest {
     }
 
     /// Return AccountAddress by try parse from params[index]
-    fn parse_account_address(&self, index: usize) -> Result<AccountAddress> {
+    fn parse_account_address(&self, index: usize) -> Result<AccountAddress, JsonRpcError> {
         self.try_parse_param(index, "account address")
     }
 
@@ -129,7 +164,7 @@ impl JsonRpcRequest {
     ///   2. call TryFrom<String> to create target T instance.
     /// The name argument is for creating helpful error messsage in case deserialization
     /// failed.
-    fn try_parse_param<T>(&self, index: usize, name: &str) -> Result<T>
+    fn try_parse_param<T>(&self, index: usize, name: &str) -> Result<T, JsonRpcError>
     where
         T: TryFrom<String>,
     {
@@ -140,7 +175,7 @@ impl JsonRpcRequest {
     /// Return native type of params[index] deserialized by from json value.
     /// The name argument is for creating helpful error messsage in case deserialization
     /// failed.
-    fn parse_param<T>(&self, index: usize, name: &str) -> Result<T>
+    fn parse_param<T>(&self, index: usize, name: &str) -> Result<T, JsonRpcError>
     where
         T: DeserializeOwned,
     {
@@ -150,26 +185,47 @@ impl JsonRpcRequest {
         )
     }
 
+    fn parse_version_param(&self, index: usize, name: &str) -> Result<u64, JsonRpcError> {
+        if self.get_param(index).is_null() {
+            return Ok(self.version());
+        }
+        let version: u64 = self.parse_param(index, name)?;
+        if version > self.version() {
+            return Err(JsonRpcError::invalid_param(
+                index,
+                name,
+                format!("<= known latest version {}", self.version()).as_str(),
+            ));
+        }
+        Ok(version)
+    }
+
+    fn parse_signed_transaction(
+        &self,
+        index: usize,
+        name: &str,
+    ) -> Result<SignedTransaction, JsonRpcError> {
+        Ok(self
+            ._parse_signed_transaction(self.get_param(index))
+            .map_err(|_| invalid_param(index, name))?)
+    }
+
+    fn parse_event_key(&self, index: usize, name: &str) -> Result<EventKey, JsonRpcError> {
+        Ok(self
+            ._parse_event_key(self.get_param(index))
+            .map_err(|_| invalid_param(index, name))?)
+    }
+
+    // the following methods should not be called directly as they return error causes internal error
+    // call related wrapper method for parsing param.
     fn _parse_event_key(&self, val: Value) -> Result<EventKey> {
         let raw: String = serde_json::from_value(val)?;
         Ok(EventKey::try_from(&hex::decode(raw)?[..])?)
     }
 
-    fn _parse_signed_trasaction(&self, val: Value) -> Result<SignedTransaction> {
+    fn _parse_signed_transaction(&self, val: Value) -> Result<SignedTransaction> {
         let raw: String = serde_json::from_value(val)?;
-        Ok(lcs::from_bytes(&hex::decode(raw)?)?)
-    }
-
-    fn parse_signed_transaction(&self, index: usize, name: &str) -> Result<SignedTransaction> {
-        Ok(self
-            ._parse_signed_trasaction(self.get_param(index))
-            .map_err(|_| invalid_param(index, name))?)
-    }
-
-    fn parse_event_key(&self, index: usize, name: &str) -> Result<EventKey> {
-        Ok(self
-            ._parse_event_key(self.get_param(index))
-            .map_err(|_| invalid_param(index, name))?)
+        Ok(bcs::from_bytes(&hex::decode(raw)?)?)
     }
 }
 
@@ -180,6 +236,13 @@ async fn submit(mut service: JsonRpcService, request: JsonRpcRequest) -> Result<
     trace_code_block!("json-rpc::submit", {"txn", transaction.sender(), transaction.sequence_number()});
 
     let (req_sender, callback) = oneshot::channel();
+
+    fail_point!("jsonrpc::method::submit::mempool_sender", |_| {
+        Err(anyhow::anyhow!(
+            "Injected error for mempool_sender call error"
+        ))
+    });
+
     service
         .mempool_sender
         .send((transaction, req_sender))
@@ -201,17 +264,11 @@ async fn get_account(
     request: JsonRpcRequest,
 ) -> Result<Option<AccountView>> {
     let account_address: AccountAddress = request.parse_account_address(0)?;
-    let account_state_blob = service
-        .db
-        .get_account_state_with_proof_by_version(account_address, request.version())?
-        .0;
 
-    let blob = match account_state_blob {
+    let account_state = match service.get_account_state(account_address, request.version())? {
         Some(val) => val,
         None => return Ok(None),
     };
-
-    let account_state = AccountState::try_from(&blob)?;
     let account_resource = account_state
         .get_account_resource()?
         .ok_or_else(|| format_err!("invalid account data: no account resource"))?;
@@ -243,20 +300,49 @@ async fn get_account(
 /// Returns the blockchain metadata for a specified version. If no version is specified, default to
 /// returning the current blockchain metadata
 /// Can be used to verify that target Full Node is up-to-date
-async fn get_metadata(service: JsonRpcService, request: JsonRpcRequest) -> Result<BlockMetadata> {
+async fn get_metadata(service: JsonRpcService, request: JsonRpcRequest) -> Result<MetadataView> {
     let chain_id = service.chain_id().id();
-    match serde_json::from_value::<u64>(request.get_param(0)) {
-        Ok(version) => Ok(BlockMetadata {
-            version,
-            timestamp: service.db.get_block_timestamp(version)?,
-            chain_id,
-        }),
-        _ => Ok(BlockMetadata {
-            version: request.version(),
-            timestamp: request.ledger_info.ledger_info().timestamp_usecs(),
-            chain_id,
-        }),
+    let version = if !request.params.is_empty() {
+        request.parse_version_param(0, "version")?
+    } else {
+        request.version()
+    };
+
+    let mut script_hash_allow_list: Option<Vec<BytesView>> = None;
+    let mut module_publishing_allowed: Option<bool> = None;
+    let mut diem_version: Option<u64> = None;
+    let mut dual_attestation_limit: Option<u64> = None;
+    if version == request.version() {
+        if let Some(account) = service.get_account_state(diem_root_address(), version)? {
+            if let Some(vm_publishing_option) = account.get_vm_publishing_option()? {
+                script_hash_allow_list = Some(
+                    vm_publishing_option
+                        .script_allow_list
+                        .iter()
+                        .map(|v| BytesView::from(v.to_vec()))
+                        .collect(),
+                );
+
+                module_publishing_allowed = Some(vm_publishing_option.is_open_module);
+            }
+            if let Some(v) = account.get_diem_version()? {
+                diem_version = Some(v.major)
+            }
+            if let Some(limit) = account.get_resource::<Limit>()? {
+                dual_attestation_limit = Some(limit.micro_xdx_limit)
+            }
+        }
     }
+    Ok(MetadataView {
+        version,
+        accumulator_root_hash: service.db.get_accumulator_root_hash(version)?.into(),
+        timestamp: service.db.get_block_timestamp(version)?,
+        chain_id,
+        script_hash_allow_list,
+        module_publishing_allowed,
+        diem_version,
+        dual_attestation_limit,
+    })
 }
 
 /// Returns transactions by range
@@ -269,6 +355,10 @@ async fn get_transactions(
     let include_events: bool = request.parse_param(2, "include_events")?;
 
     service.validate_page_size_limit(limit as usize)?;
+
+    if start_version > request.version() {
+        return Ok(vec![]);
+    }
 
     let txs =
         service
@@ -296,23 +386,62 @@ async fn get_transactions(
                 .ok_or_else(|| format_err!("Missing events for version: {}", v))?
                 .iter()
                 .cloned()
-                .map(|x| (start_version + v as u64, x).into())
-                .collect()
+                .map(|x| (start_version + v as u64, x).try_into())
+                .collect::<Result<Vec<EventView>>>()?
         } else {
             vec![]
         };
 
         result.push(TransactionView {
             version: start_version + v as u64,
-            hash: tx.hash().to_hex(),
-            bytes: lcs::to_bytes(&tx)?.into(),
-            transaction: tx.into(),
+            hash: tx.hash().into(),
+            bytes: bcs::to_bytes(&tx)?.into(),
+            transaction: transaction_data_view_from_transaction(tx),
             events,
-            vm_status: info.status().into(),
+            vm_status: vm_status_view_from_kept_vm_status(info.status()),
             gas_used: info.gas_used(),
         });
     }
     Ok(result)
+}
+
+/// Returns transactions by range with proofs
+async fn get_transactions_with_proofs(
+    service: JsonRpcService,
+    request: JsonRpcRequest,
+) -> Result<Option<TransactionsWithProofsView>> {
+    let start_version: u64 = request.parse_param(0, "start_version")?;
+    let limit: u64 = request.parse_param(1, "limit")?;
+
+    let req_version: u64 = request.version();
+
+    // Notice limit is a u16 normally, but some APIs require u64 below
+    service.validate_page_size_limit(limit as usize)?;
+
+    if start_version > req_version {
+        return Ok(None);
+    }
+
+    // We do not fetch events since they don't come with proofs.
+    let txs = service
+        .db
+        .get_transactions(start_version, limit, req_version, false)?;
+
+    let mut blobs = vec![];
+    for t in txs.transactions.iter() {
+        let bv = bcs::to_bytes(t)?;
+        blobs.push(BytesView::from(bv));
+    }
+
+    let (proofs, tx_info) = txs.proof.unpack();
+
+    Ok(Some(TransactionsWithProofsView {
+        serialized_transactions: blobs,
+        proofs: TransactionsProofsView {
+            ledger_info_to_transaction_infos_proof: BytesView::from(&bcs::to_bytes(&proofs)?),
+            transaction_infos: BytesView::from(&bcs::to_bytes(&tx_info)?),
+        },
+    }))
 }
 
 /// Returns account transaction by account and sequence_number
@@ -341,16 +470,16 @@ async fn get_account_transaction(
             .events
             .unwrap_or_default()
             .into_iter()
-            .map(|x| ((tx_version, x).into()))
-            .collect();
+            .map(|x| (tx_version, x).try_into())
+            .collect::<Result<Vec<EventView>>>()?;
 
         Ok(Some(TransactionView {
             version: tx_version,
-            hash: tx.transaction.hash().to_hex(),
-            bytes: lcs::to_bytes(&tx.transaction)?.into(),
-            transaction: tx.transaction.into(),
+            hash: tx.transaction.hash().into(),
+            bytes: bcs::to_bytes(&tx.transaction)?.into(),
+            transaction: transaction_data_view_from_transaction(tx.transaction),
             events,
-            vm_status: tx.proof.transaction_info().status().into(),
+            vm_status: vm_status_view_from_kept_vm_status(tx.proof.transaction_info().status()),
             gas_used: tx.proof.transaction_info().gas_used(),
         }))
     } else {
@@ -367,17 +496,53 @@ async fn get_events(service: JsonRpcService, request: JsonRpcRequest) -> Result<
 
     service.validate_page_size_limit(limit as usize)?;
 
-    let events_with_proof = service
+    let events_raw = service
         .db
         .get_events(&event_key, start, Order::Ascending, limit)?;
 
     let req_version = request.version();
-    let events = events_with_proof
+    let events = events_raw
         .into_iter()
         .filter(|(version, _event)| version <= &req_version)
-        .map(|event| event.into())
-        .collect();
+        .map(|event| event.try_into())
+        .collect::<Result<Vec<EventView>>>()?;
     Ok(events)
+}
+
+/// Returns events by given access path along with their proofs
+async fn get_events_with_proofs(
+    service: JsonRpcService,
+    request: JsonRpcRequest,
+) -> Result<Vec<EventWithProofView>> {
+    let event_key = request.parse_event_key(0, "event key")?;
+
+    let start: u64 = request.parse_param(1, "start")?;
+    let limit: u64 = request.parse_param(2, "limit")?;
+
+    let req_version = request.version();
+
+    service.validate_page_size_limit(limit as usize)?;
+
+    let events_with_proofs = service.db.get_events_with_proofs(
+        &event_key,
+        start,
+        Order::Ascending,
+        limit,
+        Some(req_version),
+    )?;
+
+    let mut results = vec![];
+
+    for event in events_with_proofs
+        .into_iter()
+        .filter(|e| e.transaction_version <= req_version)
+    {
+        results.push(EventWithProofView {
+            event_with_proof: bcs::to_bytes(&event)?.into(),
+        });
+    }
+
+    Ok(results)
 }
 
 /// Returns meta information about supported currencies
@@ -385,16 +550,13 @@ async fn get_currencies(
     service: JsonRpcService,
     request: JsonRpcRequest,
 ) -> Result<Vec<CurrencyInfoView>> {
-    if let Some(blob) = service
-        .db
-        .get_account_state_with_proof_by_version(libra_root_address(), request.version())?
-        .0
+    if let Some(account_state) =
+        service.get_account_state(diem_root_address(), request.version())?
     {
-        let account_state = AccountState::try_from(&blob)?;
         Ok(account_state
             .get_registered_currency_info_resources()?
             .iter()
-            .map(|info| CurrencyInfoView::from(info.as_ref().unwrap()))
+            .map(|info| info.into())
             .collect())
     } else {
         Ok(vec![])
@@ -413,13 +575,16 @@ async fn get_account_transactions(
 
     service.validate_page_size_limit(limit as usize)?;
 
-    let account_seq = AccountResource::try_from(
-        &service
-            .db
-            .get_latest_account_state(account)?
-            .ok_or_else(|| format_err!("Account doesn't exist"))?,
-    )?
-    .sequence_number();
+    let account_state = service
+        .db
+        .get_latest_account_state(account)?
+        .ok_or_else(|| {
+            JsonRpcError::invalid_request_with_msg(format!(
+                "could not find account by address {}",
+                account
+            ))
+        })?;
+    let account_seq = AccountResource::try_from(&account_state)?.sequence_number();
 
     if start >= account_seq {
         return Ok(vec![]);
@@ -448,19 +613,19 @@ async fn get_account_transactions(
             tx.events
                 .unwrap_or_default()
                 .into_iter()
-                .map(|x| ((tx_version, x).into()))
-                .collect()
+                .map(|x| ((tx_version, x).try_into()))
+                .collect::<Result<Vec<EventView>>>()?
         } else {
             vec![]
         };
 
         all_txs.push(TransactionView {
             version: tx.version,
-            hash: tx.transaction.hash().to_hex(),
-            bytes: lcs::to_bytes(&tx.transaction)?.into(),
-            transaction: tx.transaction.into(),
+            hash: tx.transaction.hash().into(),
+            bytes: bcs::to_bytes(&tx.transaction)?.into(),
+            transaction: transaction_data_view_from_transaction(tx.transaction),
             events,
-            vm_status: tx.proof.transaction_info().status().into(),
+            vm_status: vm_status_view_from_kept_vm_status(tx.proof.transaction_info().status()),
             gas_used: tx.proof.transaction_info().gas_used(),
         });
     }
@@ -473,7 +638,7 @@ async fn get_state_proof(
     service: JsonRpcService,
     request: JsonRpcRequest,
 ) -> Result<StateProofView> {
-    let known_version: u64 = request.parse_param(0, "known version")?;
+    let known_version: u64 = request.parse_version_param(0, "version")?;
     let proofs = service
         .db
         .get_state_proof_with_ledger_info(known_version, request.ledger_info.clone())?;
@@ -486,14 +651,19 @@ async fn get_state_proof(
 async fn get_account_state_with_proof(
     service: JsonRpcService,
     request: JsonRpcRequest,
-) -> Result<AccountStateWithProofView> {
+) -> Result<AccountStateWithProofView, JsonRpcError> {
     let account_address = request.parse_account_address(0)?;
 
     // If versions are specified by the request parameters, use them, otherwise use the defaults
-    let version =
-        serde_json::from_value::<u64>(request.get_param(1)).unwrap_or_else(|_| request.version());
-    let ledger_version =
-        serde_json::from_value::<u64>(request.get_param(2)).unwrap_or_else(|_| request.version());
+    let version = request.parse_version_param(1, "version")?;
+    let ledger_version = request.parse_version_param(2, "ledger version for proof")?;
+
+    if version > ledger_version {
+        return Err(JsonRpcError::invalid_request_with_msg(format!(
+            "version({}) should <= ledger version({})",
+            version, ledger_version
+        )));
+    }
 
     let account_state_with_proof =
         service
@@ -506,7 +676,7 @@ async fn get_account_state_with_proof(
 
 /// Returns the number of peers this node is connected to
 async fn get_network_status(service: JsonRpcService, _request: JsonRpcRequest) -> Result<u64> {
-    let peers = counters::LIBRA_NETWORK_PEERS
+    let peers = counters::DIEM_NETWORK_PEERS
         .get_metric_with_label_values(&[service.role.as_str(), "connected"])?;
     Ok(peers.get() as u64)
 }
@@ -537,7 +707,9 @@ pub(crate) fn build_registry() -> RpcRegistry {
     );
     register_rpc_method!(registry, "get_events", get_events, 3, 0);
     register_rpc_method!(registry, "get_currencies", get_currencies, 0, 0);
+    register_rpc_method!(registry, "get_network_status", get_network_status, 0, 0);
 
+    // Proof APIs
     register_rpc_method!(registry, "get_state_proof", get_state_proof, 1, 0);
     register_rpc_method!(
         registry,
@@ -546,7 +718,20 @@ pub(crate) fn build_registry() -> RpcRegistry {
         3,
         0
     );
-    register_rpc_method!(registry, "get_network_status", get_network_status, 0, 0);
+    register_rpc_method!(
+        registry,
+        "get_transactions_with_proofs",
+        get_transactions_with_proofs,
+        2,
+        0
+    );
+    register_rpc_method!(
+        registry,
+        "get_events_with_proofs",
+        get_events_with_proofs,
+        3,
+        0
+    );
 
     registry
 }
@@ -561,8 +746,9 @@ fn invalid_param(index: usize, name: &str) -> JsonRpcError {
         "include_events" => "boolean",
         "account address" => "hex-encoded string",
         "event key" => "hex-encoded string",
-        "known version" => "unsigned int64",
-        "data" => "hex-encoded string of LCS serialized Libra SignedTransaction type",
+        "data" => "hex-encoded string of BCS serialized Diem SignedTransaction type",
+        "version" => "unsigned int64",
+        "ledger version for proof" => "unsigned int64",
         _ => "unknown",
     };
     JsonRpcError::invalid_param(index, name, type_info)

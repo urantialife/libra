@@ -1,11 +1,11 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use consensus_types::block::block_test_utils;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use libra_crypto::{ed25519::Ed25519PrivateKey, Uniform};
-use libra_secure_storage::{InMemoryStorage, KVStorage, OnDiskStorage, Storage, VaultStorage};
-use libra_types::validator_signer::ValidatorSigner;
+use diem_crypto::{ed25519::Ed25519PrivateKey, Uniform};
+use diem_secure_storage::{InMemoryStorage, KVStorage, OnDiskStorage, Storage, VaultStorage};
+use diem_types::validator_signer::ValidatorSigner;
 use safety_rules::{test_utils, PersistentSafetyStorage, SafetyRulesManager, TSafetyRules};
 use tempfile::NamedTempFile;
 
@@ -64,8 +64,9 @@ fn in_memory(n: u64) {
         signer.private_key().clone(),
         Ed25519PrivateKey::generate_for_testing(),
         waypoint,
+        true,
     );
-    let safety_rules_manager = SafetyRulesManager::new_local(storage, false);
+    let safety_rules_manager = SafetyRulesManager::new_local(storage, false, false);
     lsr(safety_rules_manager.client(), signer, n);
 }
 
@@ -79,8 +80,9 @@ fn on_disk(n: u64) {
         signer.private_key().clone(),
         Ed25519PrivateKey::generate_for_testing(),
         waypoint,
+        true,
     );
-    let safety_rules_manager = SafetyRulesManager::new_local(storage, false);
+    let safety_rules_manager = SafetyRulesManager::new_local(storage, false, false);
     lsr(safety_rules_manager.client(), signer, n);
 }
 
@@ -94,8 +96,9 @@ fn serializer(n: u64) {
         signer.private_key().clone(),
         Ed25519PrivateKey::generate_for_testing(),
         waypoint,
+        true,
     );
-    let safety_rules_manager = SafetyRulesManager::new_serializer(storage, false);
+    let safety_rules_manager = SafetyRulesManager::new_serializer(storage, false, false);
     lsr(safety_rules_manager.client(), signer, n);
 }
 
@@ -109,10 +112,11 @@ fn thread(n: u64) {
         signer.private_key().clone(),
         Ed25519PrivateKey::generate_for_testing(),
         waypoint,
+        true,
     );
     // Test value, in milliseconds
     let timeout_ms = 5_000;
-    let safety_rules_manager = SafetyRulesManager::new_thread(storage, false, timeout_ms);
+    let safety_rules_manager = SafetyRulesManager::new_thread(storage, false, false, timeout_ms);
     lsr(safety_rules_manager.client(), signer, n);
 }
 
@@ -120,13 +124,7 @@ fn vault(n: u64) {
     let signer = ValidatorSigner::from_int(0);
     let waypoint = test_utils::validator_signers_to_waypoint(&[&signer]);
 
-    let mut storage = VaultStorage::new(
-        VAULT_HOST.to_string(),
-        VAULT_TOKEN.to_string(),
-        None,
-        None,
-        None,
-    );
+    let mut storage = create_vault_storage();
     storage.reset_and_clear().unwrap();
 
     let storage = PersistentSafetyStorage::initialize(
@@ -135,10 +133,11 @@ fn vault(n: u64) {
         signer.private_key().clone(),
         Ed25519PrivateKey::generate_for_testing(),
         waypoint,
+        true,
     );
     // Test value in milliseconds.
     let timeout_ms = 5_000;
-    let safety_rules_manager = SafetyRulesManager::new_thread(storage, false, timeout_ms);
+    let safety_rules_manager = SafetyRulesManager::new_thread(storage, false, false, timeout_ms);
     lsr(safety_rules_manager.client(), signer, n);
 }
 
@@ -147,13 +146,7 @@ pub fn benchmark(c: &mut Criterion) {
     let duration_secs = 5;
     let samples = 10;
 
-    let storage = VaultStorage::new(
-        VAULT_HOST.to_string(),
-        VAULT_TOKEN.to_string(),
-        None,
-        None,
-        None,
-    );
+    let storage = create_vault_storage();
 
     let enable_vault = if storage.available().is_err() {
         println!(
@@ -177,6 +170,19 @@ pub fn benchmark(c: &mut Criterion) {
     if enable_vault {
         group.bench_function("Vault", |b| b.iter(|| vault(black_box(count))));
     }
+}
+
+fn create_vault_storage() -> VaultStorage {
+    VaultStorage::new(
+        VAULT_HOST.to_string(),
+        VAULT_TOKEN.to_string(),
+        None,
+        None,
+        None,
+        true,
+        None,
+        None,
+    )
 }
 
 criterion_group!(benches, benchmark);

@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
@@ -7,12 +7,12 @@ use anyhow::{bail, Result};
 use move_core_types::{
     account_address::AccountAddress, identifier::Identifier, language_storage::ModuleId,
 };
-use serde::{Deserialize, Serialize};
-use spec_lang::{
+use move_model::{
     ast::Value,
-    env::{GlobalEnv, ModuleEnv, NamedConstantEnv},
+    model::{GlobalEnv, ModuleEnv, NamedConstantEnv},
     symbol::Symbol,
 };
+use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     convert::TryFrom,
@@ -112,11 +112,11 @@ impl ErrorMapping {
     pub fn from_file<P: AsRef<Path>>(path: P) -> Self {
         let mut bytes = Vec::new();
         File::open(path).unwrap().read_to_end(&mut bytes).unwrap();
-        lcs::from_bytes(&bytes).unwrap()
+        bcs::from_bytes(&bytes).unwrap()
     }
 
     pub fn to_file<P: AsRef<Path>>(&self, path: P) {
-        let bytes = lcs::to_bytes(self).unwrap();
+        let bytes = bcs::to_bytes(self).unwrap();
         let mut file = File::create(path).unwrap();
         file.write_all(&bytes).unwrap();
     }
@@ -159,7 +159,7 @@ impl<'env> ErrmapGen<'env> {
 
     pub fn gen(&mut self) {
         for module in self.env.get_modules() {
-            if !module.is_script_module() && !module.is_dependency() {
+            if !module.is_script_module() && module.is_target() {
                 self.build_error_map(&module).unwrap()
             }
         }

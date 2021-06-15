@@ -1,8 +1,8 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::config::Error;
-use libra_secure_storage::{
+use diem_secure_storage::{
     GitHubStorage, InMemoryStorage, NamespacedStorage, OnDiskStorage, Storage, VaultStorage,
 };
 use serde::{Deserialize, Serialize};
@@ -24,6 +24,8 @@ pub struct GitHubConfig {
     pub repository_owner: String,
     /// The repository where storage will mount
     pub repository: String,
+    /// The branch containing storage, defaults to master
+    pub branch: Option<String>,
     /// The authorization token for accessing the repository
     pub token: Token,
     /// A namespace is an optional portion of the path to a key stored within GitHubConfig. For
@@ -49,6 +51,12 @@ pub struct VaultConfig {
     pub server: String,
     /// The authorization token for accessing secrets
     pub token: Token,
+    /// Disable check-and-set when writing secrets to Vault
+    pub disable_cas: Option<bool>,
+    /// Timeout for new vault socket connections, in milliseconds.
+    pub connection_timeout_ms: Option<u64>,
+    /// Timeout for generic vault operations (e.g., reads and writes), in milliseconds.
+    pub response_timeout_ms: Option<u64>,
 }
 
 impl VaultConfig {
@@ -56,7 +64,7 @@ impl VaultConfig {
         let path = self
             .ca_certificate
             .as_ref()
-            .ok_or_else(|| Error::Missing("ca_certificate"))?;
+            .ok_or(Error::Missing("ca_certificate"))?;
         read_file(path)
     }
 }
@@ -109,7 +117,7 @@ impl Default for OnDiskStorageConfig {
         Self {
             namespace: None,
             path: PathBuf::from("secure_storage.json"),
-            data_dir: PathBuf::from("/opt/libra/data"),
+            data_dir: PathBuf::from("/opt/diem/data"),
         }
     }
 }
@@ -144,6 +152,11 @@ impl From<&SecureBackend> for Storage {
                 let storage = Storage::from(GitHubStorage::new(
                     config.repository_owner.clone(),
                     config.repository.clone(),
+                    config
+                        .branch
+                        .as_ref()
+                        .cloned()
+                        .unwrap_or_else(|| "master".to_string()),
                     config.token.read_token().expect("Unable to read token"),
                 ));
                 if let Some(namespace) = &config.namespace {
@@ -170,6 +183,9 @@ impl From<&SecureBackend> for Storage {
                     .as_ref()
                     .map(|_| config.ca_certificate().unwrap()),
                 config.renew_ttl_secs,
+                config.disable_cas.map_or_else(|| true, |disable| !disable),
+                config.connection_timeout_ms,
+                config.response_timeout_ms,
             )),
         }
     }
@@ -193,6 +209,9 @@ mod tests {
                 ca_certificate: None,
                 token: Token::FromConfig("test".to_string()),
                 renew_ttl_secs: None,
+                disable_cas: None,
+                connection_timeout_ms: None,
+                response_timeout_ms: None,
             },
         };
 
@@ -210,6 +229,36 @@ vault:
     }
 
     #[test]
+    fn test_vault_timeout_parsing() {
+        let from_config = Config {
+            vault: VaultConfig {
+                namespace: None,
+                server: "127.0.0.1:8200".to_string(),
+                ca_certificate: None,
+                token: Token::FromConfig("test".to_string()),
+                renew_ttl_secs: None,
+                disable_cas: None,
+                connection_timeout_ms: Some(3000),
+                response_timeout_ms: Some(5000),
+            },
+        };
+
+        let text_from_config = r#"
+vault:
+    server: "127.0.0.1:8200"
+    token:
+        from_config: "test"
+    connection_timeout_ms: 3000
+    response_timeout_ms: 5000
+        "#;
+
+        let de_from_config: Config = serde_yaml::from_str(text_from_config).unwrap();
+        assert_eq!(de_from_config, from_config);
+        // Just assert that it can be serialized, no need to do string comparison
+        serde_yaml::to_string(&from_config).unwrap();
+    }
+
+    #[test]
     fn test_token_disk_parsing() {
         let from_disk = Config {
             vault: VaultConfig {
@@ -218,6 +267,9 @@ vault:
                 ca_certificate: None,
                 token: Token::FromDisk(PathBuf::from("/token")),
                 renew_ttl_secs: None,
+                disable_cas: None,
+                connection_timeout_ms: None,
+                response_timeout_ms: None,
             },
         };
 
@@ -236,7 +288,7 @@ vault:
 
     #[test]
     fn test_token_reading() {
-        let temppath = libra_temppath::TempPath::new();
+        let temppath = diem_temppath::TempPath::new();
         temppath.create_as_file().unwrap();
         let mut file = File::create(temppath.path()).unwrap();
         file.write_all(b"disk_token").unwrap();

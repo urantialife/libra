@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
@@ -9,26 +9,28 @@ use crate::{
     storage::{local_fs::LocalFs, BackupStorage},
     utils::{
         backup_service_client::BackupServiceClient,
-        test_utils::{start_local_backup_service, tmp_db_empty, tmp_db_with_random_content},
-        GlobalBackupOpt, GlobalRestoreOpt,
+        test_utils::{start_local_backup_service, tmp_db_with_random_content},
+        ConcurrentDownloadsOpt, GlobalBackupOpt, GlobalRestoreOpt, RocksdbOpt, TrustedWaypointOpt,
     },
 };
-use libra_temppath::TempPath;
-use libra_types::transaction::Version;
-use libradb::GetRestoreHandler;
-use std::{mem::size_of, path::PathBuf, sync::Arc};
+use diem_config::config::RocksdbConfig;
+use diem_temppath::TempPath;
+use diem_types::transaction::Version;
+use diemdb::DiemDB;
+use std::{convert::TryInto, mem::size_of, sync::Arc};
 use storage_interface::DbReader;
 use tokio::time::Duration;
 
 #[test]
 fn end_to_end() {
     let (_src_db_dir, src_db, blocks) = tmp_db_with_random_content();
-    let (_tgt_db_dir, tgt_db) = tmp_db_empty();
+    let tgt_db_dir = TempPath::new();
+    tgt_db_dir.create_as_dir().unwrap();
     let backup_dir = TempPath::new();
     backup_dir.create_as_dir().unwrap();
     let store: Arc<dyn BackupStorage> = Arc::new(LocalFs::new(backup_dir.path().to_path_buf()));
 
-    let (mut rt, port) = start_local_backup_service(src_db);
+    let (rt, port) = start_local_backup_service(src_db);
     let client = Arc::new(BackupServiceClient::new(format!(
         "http://localhost:{}",
         port
@@ -45,7 +47,7 @@ fn end_to_end() {
         .collect::<Vec<_>>();
     let max_chunk_size = txns
         .iter()
-        .map(|t| lcs::to_bytes(t).unwrap().len())
+        .map(|t| bcs::to_bytes(t).unwrap().len())
         .max()
         .unwrap() // biggest txn
         + 115 // size of a serialized TransactionInfo
@@ -77,11 +79,17 @@ fn end_to_end() {
                 replay_from_version: None, // max
             },
             GlobalRestoreOpt {
-                db_dir: PathBuf::new(),
+                dry_run: false,
+                db_dir: Some(tgt_db_dir.path().to_path_buf()),
                 target_version: Some(target_version),
-            },
+                trusted_waypoints: TrustedWaypointOpt::default(),
+                rocksdb_opt: RocksdbOpt::default(),
+                concurernt_downloads: ConcurrentDownloadsOpt::default(),
+            }
+            .try_into()
+            .unwrap(),
             store,
-            Arc::new(tgt_db.get_restore_handler()),
+            None, /* epoch_history */
         )
         .run(),
     )
@@ -90,6 +98,13 @@ fn end_to_end() {
     // We don't write down any ledger infos when recovering transactions. State-sync needs to take
     // care of it before running consensus. The latest transactions are deemed "synced" instead of
     // "committed" most likely.
+    let tgt_db = DiemDB::open(
+        &tgt_db_dir,
+        true, /* read_only */
+        None, /* pruner */
+        RocksdbConfig::default(),
+    )
+    .unwrap();
     assert_eq!(
         tgt_db
             .get_latest_transaction_info_option()
@@ -103,17 +118,30 @@ fn end_to_end() {
             first_ver_to_backup,
             num_txns_to_restore as u64,
             target_version,
-            false,
+            true, /* fetch_events */
         )
-        .unwrap()
-        .transactions;
+        .unwrap();
 
     assert_eq!(
-        recovered_transactions,
+        recovered_transactions.transactions,
         txns.into_iter()
             .skip(first_ver_to_backup as usize)
             .take(num_txns_to_restore)
             .cloned()
+            .collect::<Vec<_>>()
+    );
+
+    assert_eq!(
+        recovered_transactions.events.unwrap(),
+        blocks
+            .iter()
+            .map(|(txns, _li)| {
+                txns.iter()
+                    .map(|txn_to_commit| txn_to_commit.events().to_vec())
+            })
+            .flatten()
+            .skip(first_ver_to_backup as usize)
+            .take(num_txns_to_restore)
             .collect::<Vec<_>>()
     );
 

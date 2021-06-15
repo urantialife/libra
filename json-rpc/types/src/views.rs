@@ -1,32 +1,30 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::{format_err, Error, Result};
-use libra_crypto::HashValue;
-use libra_types::{
+use diem_crypto::HashValue;
+use diem_types::{
     account_config::{
-        AccountResource, AccountRole, BalanceResource, BaseUrlRotationEvent, BurnEvent,
-        CancelBurnEvent, ComplianceKeyRotationEvent, CurrencyInfoResource, FreezingBit, MintEvent,
-        NewBlockEvent, NewEpochEvent, PreburnEvent, ReceivedMintEvent, ReceivedPaymentEvent,
-        SentPaymentEvent, ToLBRExchangeRateUpdateEvent, UpgradeEvent,
+        AccountResource, AccountRole, AdminTransactionEvent, BalanceResource, BaseUrlRotationEvent,
+        BurnEvent, CancelBurnEvent, ComplianceKeyRotationEvent, CreateAccountEvent,
+        CurrencyInfoResource, FreezingBit, MintEvent, NewBlockEvent, NewEpochEvent, PreburnEvent,
+        ReceivedMintEvent, ReceivedPaymentEvent, SentPaymentEvent, ToXDXExchangeRateUpdateEvent,
     },
     account_state_blob::AccountStateWithProof,
     contract_event::ContractEvent,
     epoch_change::EpochChangeProof,
     ledger_info::LedgerInfoWithSignatures,
     proof::{AccountStateProof, AccumulatorConsistencyProof},
-    transaction::{Transaction, TransactionArgument, TransactionPayload},
-    vm_status::KeptVMStatus,
 };
 use move_core_types::{
-    account_address::AccountAddress,
-    identifier::Identifier,
-    language_storage::{StructTag, TypeTag},
+    account_address::AccountAddress, identifier::Identifier, language_storage::TypeTag,
     move_resource::MoveResource,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, convert::TryFrom};
-use transaction_builder::get_transaction_name;
+use std::{
+    collections::BTreeMap,
+    convert::{TryFrom, TryInto},
+};
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub struct AmountView {
@@ -124,6 +122,11 @@ pub struct EventView {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct EventWithProofView {
+    pub event_with_proof: BytesView,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type")]
 pub enum EventDataView {
     #[serde(rename = "burn")]
@@ -138,10 +141,10 @@ pub enum EventDataView {
     },
     #[serde(rename = "mint")]
     Mint { amount: AmountView },
-    #[serde(rename = "to_lbr_exchange_rate_update")]
-    ToLBRExchangeRateUpdate {
+    #[serde(rename = "to_xdx_exchange_rate_update")]
+    ToXDXExchangeRateUpdate {
         currency_code: String,
-        new_to_lbr_exchange_rate: f32,
+        new_to_xdx_exchange_rate: f32,
     },
     #[serde(rename = "preburn")]
     Preburn {
@@ -162,8 +165,8 @@ pub enum EventDataView {
         sender: BytesView,
         metadata: BytesView,
     },
-    #[serde(rename = "upgrade")]
-    Upgrade { write_set: BytesView },
+    #[serde(rename = "admintransaction")]
+    AdminTransaction { committed_timestamp_secs: u64 },
     #[serde(rename = "newepoch")]
     NewEpoch { epoch: u64 },
     #[serde(rename = "newblock")]
@@ -179,7 +182,7 @@ pub enum EventDataView {
     },
     #[serde(rename = "compliancekeyrotation")]
     ComplianceKeyRotation {
-        new_compliance_public_key: String,
+        new_compliance_public_key: BytesView,
         time_rotated_seconds: u64,
     },
     #[serde(rename = "baseurlrotation")]
@@ -187,182 +190,167 @@ pub enum EventDataView {
         new_base_url: String,
         time_rotated_seconds: u64,
     },
+    #[serde(rename = "createaccount")]
+    CreateAccount {
+        created_address: BytesView,
+        role_id: u64,
+    },
     #[serde(rename = "unknown")]
     Unknown {},
 }
 
-impl From<(u64, ContractEvent)> for EventView {
-    /// Tries to convert the provided byte array into Event Key.
-    fn from((txn_version, event): (u64, ContractEvent)) -> EventView {
-        let event_data = if event.type_tag() == &TypeTag::Struct(ReceivedPaymentEvent::struct_tag())
-        {
-            if let Ok(received_event) = ReceivedPaymentEvent::try_from(&event) {
-                let amount_view = AmountView::new(
-                    received_event.amount(),
-                    received_event.currency_code().as_str(),
-                );
-                Ok(EventDataView::ReceivedPayment {
-                    amount: amount_view,
-                    sender: BytesView::from(received_event.sender().as_ref()),
-                    receiver: BytesView::from(&event.key().get_creator_address().to_vec()),
-                    metadata: BytesView::from(received_event.metadata()),
-                })
-            } else {
-                Err(format_err!("Unable to parse ReceivedPaymentEvent"))
+impl TryFrom<ContractEvent> for EventDataView {
+    type Error = Error;
+
+    fn try_from(event: ContractEvent) -> Result<Self> {
+        let data = if event.type_tag() == &TypeTag::Struct(ReceivedPaymentEvent::struct_tag()) {
+            let received_event = ReceivedPaymentEvent::try_from(&event)?;
+            let amount_view = AmountView::new(
+                received_event.amount(),
+                received_event.currency_code().as_str(),
+            );
+            EventDataView::ReceivedPayment {
+                amount: amount_view,
+                sender: BytesView::from(received_event.sender().as_ref()),
+                receiver: BytesView::from(&event.key().get_creator_address().to_vec()),
+                metadata: BytesView::from(received_event.metadata()),
             }
         } else if event.type_tag() == &TypeTag::Struct(SentPaymentEvent::struct_tag()) {
-            if let Ok(sent_event) = SentPaymentEvent::try_from(&event) {
-                let amount_view =
-                    AmountView::new(sent_event.amount(), sent_event.currency_code().as_str());
-                Ok(EventDataView::SentPayment {
-                    amount: amount_view,
-                    receiver: BytesView::from(sent_event.receiver().as_ref()),
-                    sender: BytesView::from(&event.key().get_creator_address().to_vec()),
-                    metadata: BytesView::from(sent_event.metadata()),
-                })
-            } else {
-                Err(format_err!("Unable to parse SentPaymentEvent"))
-            }
-        } else if event.type_tag() == &TypeTag::Struct(BurnEvent::struct_tag()) {
-            if let Ok(burn_event) = BurnEvent::try_from(&event) {
-                let amount_view =
-                    AmountView::new(burn_event.amount(), burn_event.currency_code().as_str());
-                let preburn_address = BytesView::from(burn_event.preburn_address().as_ref());
-                Ok(EventDataView::Burn {
-                    amount: amount_view,
-                    preburn_address,
-                })
-            } else {
-                Err(format_err!("Unable to parse BurnEvent"))
-            }
-        } else if event.type_tag() == &TypeTag::Struct(CancelBurnEvent::struct_tag()) {
-            if let Ok(cancel_burn_event) = CancelBurnEvent::try_from(&event) {
-                let amount_view = AmountView::new(
-                    cancel_burn_event.amount(),
-                    cancel_burn_event.currency_code().as_str(),
-                );
-                let preburn_address = BytesView::from(cancel_burn_event.preburn_address().as_ref());
-                Ok(EventDataView::CancelBurn {
-                    amount: amount_view,
-                    preburn_address,
-                })
-            } else {
-                Err(format_err!("Unable to parse CancelBurnEvent"))
-            }
-        } else if event.type_tag() == &TypeTag::Struct(ToLBRExchangeRateUpdateEvent::struct_tag()) {
-            if let Ok(update_event) = ToLBRExchangeRateUpdateEvent::try_from(&event) {
-                Ok(EventDataView::ToLBRExchangeRateUpdate {
-                    currency_code: update_event.currency_code().to_string(),
-                    new_to_lbr_exchange_rate: update_event.new_to_lbr_exchange_rate(),
-                })
-            } else {
-                Err(format_err!("Unable to parse ToLBRExchangeRateUpdate"))
-            }
-        } else if event.type_tag() == &TypeTag::Struct(MintEvent::struct_tag()) {
-            if let Ok(mint_event) = MintEvent::try_from(&event) {
-                let amount_view =
-                    AmountView::new(mint_event.amount(), mint_event.currency_code().as_str());
-                Ok(EventDataView::Mint {
-                    amount: amount_view,
-                })
-            } else {
-                Err(format_err!("Unable to parse MintEvent"))
-            }
-        } else if event.type_tag() == &TypeTag::Struct(ReceivedMintEvent::struct_tag()) {
-            if let Ok(received_mint_event) = ReceivedMintEvent::try_from(&event) {
-                let amount_view = AmountView::new(
-                    received_mint_event.amount(),
-                    received_mint_event.currency_code().as_str(),
-                );
-                let destination_address =
-                    BytesView::from(received_mint_event.destination_address().as_ref());
-                Ok(EventDataView::ReceivedMint {
-                    amount: amount_view,
-                    destination_address,
-                })
-            } else {
-                Err(format_err!("Unable to parse ReceivedMintEvent"))
+            let sent_event = SentPaymentEvent::try_from(&event)?;
+            let amount_view =
+                AmountView::new(sent_event.amount(), sent_event.currency_code().as_str());
+            EventDataView::SentPayment {
+                amount: amount_view,
+                receiver: BytesView::from(sent_event.receiver().as_ref()),
+                sender: BytesView::from(&event.key().get_creator_address().to_vec()),
+                metadata: BytesView::from(sent_event.metadata()),
             }
         } else if event.type_tag() == &TypeTag::Struct(PreburnEvent::struct_tag()) {
-            if let Ok(preburn_event) = PreburnEvent::try_from(&event) {
-                let amount_view = AmountView::new(
-                    preburn_event.amount(),
-                    preburn_event.currency_code().as_str(),
-                );
-                let preburn_address = BytesView::from(preburn_event.preburn_address().as_ref());
-                Ok(EventDataView::Preburn {
-                    amount: amount_view,
-                    preburn_address,
-                })
-            } else {
-                Err(format_err!("Unable to parse PreBurnEvent"))
+            let preburn_event = PreburnEvent::try_from(&event)?;
+            let amount_view = AmountView::new(
+                preburn_event.amount(),
+                preburn_event.currency_code().as_str(),
+            );
+            let preburn_address = BytesView::from(preburn_event.preburn_address().as_ref());
+            EventDataView::Preburn {
+                amount: amount_view,
+                preburn_address,
             }
-        } else if event.type_tag() == &TypeTag::Struct(NewBlockEvent::struct_tag()) {
-            if let Ok(new_block_event) = NewBlockEvent::try_from(&event) {
-                Ok(EventDataView::NewBlock {
-                    proposer: BytesView::from(new_block_event.proposer().as_ref()),
-                    round: new_block_event.round(),
-                    proposed_time: new_block_event.proposed_time(),
-                })
-            } else {
-                Err(format_err!("Unable to parse NewBlockEvent"))
+        } else if event.type_tag() == &TypeTag::Struct(BurnEvent::struct_tag()) {
+            let burn_event = BurnEvent::try_from(&event)?;
+            let amount_view =
+                AmountView::new(burn_event.amount(), burn_event.currency_code().as_str());
+            let preburn_address = BytesView::from(burn_event.preburn_address().as_ref());
+            EventDataView::Burn {
+                amount: amount_view,
+                preburn_address,
             }
-        } else if event.type_tag() == &TypeTag::Struct(NewEpochEvent::struct_tag()) {
-            if let Ok(new_epoch_event) = NewEpochEvent::try_from(&event) {
-                Ok(EventDataView::NewEpoch {
-                    epoch: new_epoch_event.epoch(),
-                })
-            } else {
-                Err(format_err!("Unable to parse NewEpochEvent"))
+        } else if event.type_tag() == &TypeTag::Struct(CancelBurnEvent::struct_tag()) {
+            let cancel_burn_event = CancelBurnEvent::try_from(&event)?;
+            let amount_view = AmountView::new(
+                cancel_burn_event.amount(),
+                cancel_burn_event.currency_code().as_str(),
+            );
+            let preburn_address = BytesView::from(cancel_burn_event.preburn_address().as_ref());
+            EventDataView::CancelBurn {
+                amount: amount_view,
+                preburn_address,
             }
-        } else if event.type_tag() == &TypeTag::Struct(UpgradeEvent::struct_tag()) {
-            if let Ok(upgrade_event) = UpgradeEvent::try_from(&event) {
-                Ok(EventDataView::Upgrade {
-                    write_set: BytesView::from(upgrade_event.write_set()),
-                })
-            } else {
-                Err(format_err!("Unable to parse UpgradeEvent"))
+        } else if event.type_tag() == &TypeTag::Struct(ToXDXExchangeRateUpdateEvent::struct_tag()) {
+            let update_event = ToXDXExchangeRateUpdateEvent::try_from(&event)?;
+            EventDataView::ToXDXExchangeRateUpdate {
+                currency_code: update_event.currency_code().to_string(),
+                new_to_xdx_exchange_rate: update_event.new_to_xdx_exchange_rate(),
+            }
+        } else if event.type_tag() == &TypeTag::Struct(MintEvent::struct_tag()) {
+            let mint_event = MintEvent::try_from(&event)?;
+            let amount_view =
+                AmountView::new(mint_event.amount(), mint_event.currency_code().as_str());
+            EventDataView::Mint {
+                amount: amount_view,
+            }
+        } else if event.type_tag() == &TypeTag::Struct(ReceivedMintEvent::struct_tag()) {
+            let received_mint_event = ReceivedMintEvent::try_from(&event)?;
+            let amount_view = AmountView::new(
+                received_mint_event.amount(),
+                received_mint_event.currency_code().as_str(),
+            );
+            let destination_address =
+                BytesView::from(received_mint_event.destination_address().as_ref());
+            EventDataView::ReceivedMint {
+                amount: amount_view,
+                destination_address,
             }
         } else if event.type_tag() == &TypeTag::Struct(ComplianceKeyRotationEvent::struct_tag()) {
-            if let Ok(rotation_event) = ComplianceKeyRotationEvent::try_from(&event) {
-                Ok(EventDataView::ComplianceKeyRotation {
-                    new_compliance_public_key: hex::encode(
-                        rotation_event.new_compliance_public_key(),
-                    ),
-                    time_rotated_seconds: rotation_event.time_rotated_seconds(),
-                })
-            } else {
-                Err(format_err!("Unable to parse ComplianceKeyRotationEvent"))
+            let rotation_event = ComplianceKeyRotationEvent::try_from(&event)?;
+            EventDataView::ComplianceKeyRotation {
+                new_compliance_public_key: rotation_event.new_compliance_public_key().into(),
+                time_rotated_seconds: rotation_event.time_rotated_seconds(),
             }
         } else if event.type_tag() == &TypeTag::Struct(BaseUrlRotationEvent::struct_tag()) {
-            if let Ok(rotation_event) = BaseUrlRotationEvent::try_from(&event) {
-                String::from_utf8(rotation_event.new_base_url().to_vec())
-                    .map(|new_base_url| EventDataView::BaseUrlRotation {
-                        new_base_url,
-                        time_rotated_seconds: rotation_event.time_rotated_seconds(),
-                    })
-                    .map_err(|_| format_err!("Unable to parse BaseUrlRotationEvent"))
-            } else {
-                Err(format_err!("Unable to parse BaseUrlRotationEvent"))
+            let rotation_event = BaseUrlRotationEvent::try_from(&event)?;
+            String::from_utf8(rotation_event.new_base_url().to_vec())
+                .map(|new_base_url| EventDataView::BaseUrlRotation {
+                    new_base_url,
+                    time_rotated_seconds: rotation_event.time_rotated_seconds(),
+                })
+                .map_err(|_| format_err!("Unable to parse BaseUrlRotationEvent"))?
+        } else if event.type_tag() == &TypeTag::Struct(NewBlockEvent::struct_tag()) {
+            let new_block_event = NewBlockEvent::try_from(&event)?;
+            EventDataView::NewBlock {
+                proposer: BytesView::from(new_block_event.proposer().as_ref()),
+                round: new_block_event.round(),
+                proposed_time: new_block_event.proposed_time(),
+            }
+        } else if event.type_tag() == &TypeTag::Struct(NewEpochEvent::struct_tag()) {
+            let new_epoch_event = NewEpochEvent::try_from(&event)?;
+            EventDataView::NewEpoch {
+                epoch: new_epoch_event.epoch(),
+            }
+        } else if event.type_tag() == &TypeTag::Struct(CreateAccountEvent::struct_tag()) {
+            let create_account_event = CreateAccountEvent::try_from(&event)?;
+            let created_address = BytesView::from(create_account_event.created().as_ref());
+            let role_id = create_account_event.role_id();
+            EventDataView::CreateAccount {
+                created_address,
+                role_id,
+            }
+        } else if event.type_tag() == &TypeTag::Struct(AdminTransactionEvent::struct_tag()) {
+            let admin_transaction_event = AdminTransactionEvent::try_from(&event)?;
+            EventDataView::AdminTransaction {
+                committed_timestamp_secs: admin_transaction_event.committed_timestamp_secs(),
             }
         } else {
-            Err(format_err!("Unknown events"))
+            EventDataView::Unknown {}
         };
 
-        EventView {
+        Ok(data)
+    }
+}
+
+impl TryFrom<(u64, ContractEvent)> for EventView {
+    type Error = Error;
+
+    fn try_from((txn_version, event): (u64, ContractEvent)) -> Result<Self> {
+        Ok(EventView {
             key: BytesView::from(event.key().as_bytes()),
             sequence_number: event.sequence_number(),
             transaction_version: txn_version,
-            data: event_data.unwrap_or(EventDataView::Unknown {}),
-        }
+            data: event.try_into()?,
+        })
     }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-pub struct BlockMetadata {
+pub struct MetadataView {
     pub version: u64,
+    pub accumulator_root_hash: BytesView,
     pub timestamp: u64,
     pub chain_id: u8,
+    pub script_hash_allow_list: Option<Vec<BytesView>>,
+    pub module_publishing_allowed: Option<bool>,
+    pub diem_version: Option<u64>,
+    pub dual_attestation_limit: Option<u64>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
@@ -371,6 +359,12 @@ pub struct BytesView(pub String);
 impl BytesView {
     pub fn into_bytes(self) -> Result<Vec<u8>, Error> {
         Ok(hex::decode(self.0)?)
+    }
+}
+
+impl std::fmt::Display for BytesView {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -392,44 +386,92 @@ impl From<Vec<u8>> for BytesView {
     }
 }
 
+impl From<AccountAddress> for BytesView {
+    fn from(address: AccountAddress) -> Self {
+        address.to_vec().into()
+    }
+}
+
+impl From<&AccountAddress> for BytesView {
+    fn from(address: &AccountAddress) -> Self {
+        address.to_vec().into()
+    }
+}
+
+impl From<HashValue> for BytesView {
+    fn from(hash: HashValue) -> Self {
+        hash.to_vec().into()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct MoveAbortExplanationView {
+    pub category: String,
+    pub category_description: String,
+    pub reason: String,
+    pub reason_description: String,
+}
+
+impl std::fmt::Display for MoveAbortExplanationView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Error Category: {}", self.category)?;
+        writeln!(f, "\tCategory Description: {}", self.category_description)?;
+        writeln!(f, "Error Reason: {}", self.reason)?;
+        writeln!(f, "\tReason Description: {}", self.reason_description)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
 pub enum VMStatusView {
-    #[serde(rename = "executed")]
     Executed,
-    #[serde(rename = "out_of_gas")]
     OutOfGas,
-    #[serde(rename = "move_abort")]
-    MoveAbort { location: String, abort_code: u64 },
-    #[serde(rename = "execution_failure")]
+    MoveAbort {
+        location: String,
+        abort_code: u64,
+        explanation: Option<MoveAbortExplanationView>,
+    },
     ExecutionFailure {
         location: String,
         function_index: u16,
         code_offset: u16,
     },
-    #[serde(rename = "miscellaneous_error")]
     MiscellaneousError,
+    VerificationError,
+    DeserializationError,
+    PublishingFailure,
 }
 
-impl From<&KeptVMStatus> for VMStatusView {
-    fn from(status: &KeptVMStatus) -> Self {
-        match status {
-            KeptVMStatus::Executed => VMStatusView::Executed,
-            KeptVMStatus::OutOfGas => VMStatusView::OutOfGas,
-            KeptVMStatus::MoveAbort(loc, abort_code) => VMStatusView::MoveAbort {
-                location: loc.to_string(),
-                abort_code: *abort_code,
-            },
-            KeptVMStatus::ExecutionFailure {
+impl std::fmt::Display for VMStatusView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VMStatusView::Executed => write!(f, "Executed"),
+            VMStatusView::OutOfGas => write!(f, "Out of Gas"),
+            VMStatusView::MoveAbort {
                 location,
-                function,
+                abort_code,
+                explanation,
+            } => {
+                write!(f, "Move Abort: {} at {}", abort_code, location)?;
+                if let Some(explanation) = explanation {
+                    write!(f, "\nExplanation:\n{}", explanation)?
+                }
+                Ok(())
+            }
+            VMStatusView::ExecutionFailure {
+                location,
+                function_index,
                 code_offset,
-            } => VMStatusView::ExecutionFailure {
-                location: location.to_string(),
-                function_index: *function,
-                code_offset: *code_offset,
-            },
-            KeptVMStatus::MiscellaneousError => VMStatusView::MiscellaneousError,
+            } => write!(
+                f,
+                "Execution failure: {} {} {}",
+                location, function_index, code_offset
+            ),
+            VMStatusView::MiscellaneousError => write!(f, "Miscellaneous Error"),
+            VMStatusView::VerificationError => write!(f, "Verification Error"),
+            VMStatusView::DeserializationError => write!(f, "Deserialization Error"),
+            VMStatusView::PublishingFailure => write!(f, "Publishing Failure"),
         }
     }
 }
@@ -438,11 +480,22 @@ impl From<&KeptVMStatus> for VMStatusView {
 pub struct TransactionView {
     pub version: u64,
     pub transaction: TransactionDataView,
-    pub hash: String,
+    pub hash: BytesView,
     pub bytes: BytesView,
     pub events: Vec<EventView>,
     pub vm_status: VMStatusView,
     pub gas_used: u64,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct TransactionsWithProofsView {
+    pub serialized_transactions: Vec<BytesView>,
+    pub proofs: TransactionsProofsView,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct TransactionsProofsView {
+    pub ledger_info_to_transaction_infos_proof: BytesView,
+    pub transaction_infos: BytesView,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -455,17 +508,17 @@ pub enum TransactionDataView {
     WriteSet {},
     #[serde(rename = "user")]
     UserTransaction {
-        sender: String,
+        sender: BytesView,
         signature_scheme: String,
-        signature: String,
-        public_key: String,
+        signature: BytesView,
+        public_key: BytesView,
         sequence_number: u64,
         chain_id: u8,
         max_gas_amount: u64,
         gas_unit_price: u64,
         gas_currency: String,
         expiration_timestamp_secs: u64,
-        script_hash: String,
+        script_hash: BytesView,
         script_bytes: BytesView,
         script: ScriptView,
     },
@@ -473,74 +526,47 @@ pub enum TransactionDataView {
     UnknownTransaction {},
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[serde(tag = "type")]
-// TODO cover all script types
-pub enum ScriptView {
-    #[serde(rename = "peer_to_peer_transaction")]
-    PeerToPeer {
-        receiver: String,
-        amount: u64,
-        currency: String,
-        metadata: BytesView,
-        metadata_signature: BytesView,
-    },
-    #[serde(rename = "mint_transaction")]
-    Mint {
-        receiver: String,
-        currency: String,
-        auth_key_prefix: BytesView,
-        amount: u64,
-    },
-    #[serde(rename = "unknown_transaction")]
-    Unknown {},
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct ScriptView {
+    // script name / type
+    pub r#type: String,
+
+    // script code bytes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<BytesView>,
+    // script arguments, converted into string with type information.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<Vec<String>>,
+    // script type arguments, converted into string
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub type_arguments: Option<Vec<String>>,
+
+    // the following fields are legacy fields: maybe removed in the future
+    // please move to use above fields
+
+    // peer_to_peer_transaction, other known script name or unknown
+    // because of a bug, we never rendered mint_transaction
+    // this is deprecated, please switch to use field `name` which is script name
+
+    // peer_to_peer_transaction
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receiver: Option<BytesView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amount: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub currency: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<BytesView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata_signature: Option<BytesView>,
 }
 
 impl ScriptView {
-    // TODO cover all script types
-}
-
-impl From<Transaction> for TransactionDataView {
-    fn from(tx: Transaction) -> Self {
-        let x = match tx {
-            Transaction::BlockMetadata(t) => {
-                t.into_inner().map(|x| TransactionDataView::BlockMetadata {
-                    timestamp_usecs: x.1,
-                })
-            }
-            Transaction::GenesisTransaction(_) => Ok(TransactionDataView::WriteSet {}),
-            Transaction::UserTransaction(t) => {
-                let script_hash = match t.payload() {
-                    TransactionPayload::Script(s) => HashValue::sha3_256_of(s.code()),
-                    _ => HashValue::zero(),
-                }
-                .to_hex();
-
-                let script_bytes: BytesView = match t.payload() {
-                    TransactionPayload::Script(s) => lcs::to_bytes(s).unwrap_or_default(),
-                    _ => vec![],
-                }
-                .into();
-
-                Ok(TransactionDataView::UserTransaction {
-                    sender: t.sender().to_string(),
-                    signature_scheme: t.authenticator().scheme().to_string(),
-                    signature: hex::encode(t.authenticator().signature_bytes()),
-                    public_key: hex::encode(t.authenticator().public_key_bytes()),
-                    sequence_number: t.sequence_number(),
-                    chain_id: t.chain_id().id(),
-                    max_gas_amount: t.max_gas_amount(),
-                    gas_unit_price: t.gas_unit_price(),
-                    gas_currency: t.gas_currency_code().to_string(),
-                    expiration_timestamp_secs: t.expiration_timestamp_secs(),
-                    script_hash,
-                    script_bytes,
-                    script: t.into_raw_transaction().into_payload().into(),
-                })
-            }
-        };
-
-        x.unwrap_or(TransactionDataView::UnknownTransaction {})
+    pub fn unknown() -> Self {
+        ScriptView {
+            r#type: "unknown".to_string(),
+            ..Default::default()
+        }
     }
 }
 
@@ -596,74 +622,12 @@ impl From<AccountRole> for AccountRoleView {
     }
 }
 
-impl From<TransactionPayload> for ScriptView {
-    fn from(value: TransactionPayload) -> Self {
-        let empty_vec: Vec<TransactionArgument> = vec![];
-        let empty_ty_vec: Vec<String> = vec![];
-        let unknown_currency = "unknown_currency".to_string();
-
-        let (code, args, ty_args) = match value {
-            TransactionPayload::WriteSet(_) => ("genesis".to_string(), empty_vec, empty_ty_vec),
-            TransactionPayload::Script(script) => (
-                get_transaction_name(script.code()),
-                script.args().to_vec(),
-                script
-                    .ty_args()
-                    .iter()
-                    .map(|type_tag| match type_tag {
-                        TypeTag::Struct(StructTag { module, .. }) => module.to_string(),
-                        tag => format!("{}", tag),
-                    })
-                    .collect(),
-            ),
-            TransactionPayload::Module(_) => {
-                ("module publishing".to_string(), empty_vec, empty_ty_vec)
-            }
-        };
-
-        let res = match code.as_str() {
-            "peer_to_peer_with_metadata_transaction" => {
-                if let [TransactionArgument::Address(receiver), TransactionArgument::U64(amount), TransactionArgument::U8Vector(metadata), TransactionArgument::U8Vector(metadata_signature)] =
-                    &args[..]
-                {
-                    Ok(ScriptView::PeerToPeer {
-                        receiver: receiver.to_string(),
-                        amount: *amount,
-                        currency: ty_args.get(0).unwrap_or(&unknown_currency).to_string(),
-                        metadata: BytesView::from(metadata),
-                        metadata_signature: BytesView::from(metadata_signature),
-                    })
-                } else {
-                    Err(format_err!("Unable to parse PeerToPeer arguments"))
-                }
-            }
-            "mint" => {
-                if let [TransactionArgument::Address(receiver), TransactionArgument::U8Vector(auth_key_prefix), TransactionArgument::U64(amount)] =
-                    &args[..]
-                {
-                    let currency = ty_args.get(0).unwrap_or(&unknown_currency).to_string();
-                    Ok(ScriptView::Mint {
-                        receiver: receiver.to_string(),
-                        auth_key_prefix: BytesView::from(auth_key_prefix),
-                        amount: *amount,
-                        currency,
-                    })
-                } else {
-                    Err(format_err!("Unable to parse PeerToPeer arguments"))
-                }
-            }
-            _ => Err(format_err!("Unknown scripts")),
-        };
-        res.unwrap_or(ScriptView::Unknown {})
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct CurrencyInfoView {
     pub code: String,
     pub scaling_factor: u64,
     pub fractional_part: u64,
-    pub to_lbr_exchange_rate: f32,
+    pub to_xdx_exchange_rate: f32,
     pub mint_events_key: BytesView,
     pub burn_events_key: BytesView,
     pub preburn_events_key: BytesView,
@@ -677,7 +641,7 @@ impl From<&CurrencyInfoResource> for CurrencyInfoView {
             code: info.currency_code().to_string(),
             scaling_factor: info.scaling_factor(),
             fractional_part: info.fractional_part(),
-            to_lbr_exchange_rate: info.exchange_rate(),
+            to_xdx_exchange_rate: info.exchange_rate(),
             mint_events_key: BytesView::from(info.mint_events().key().as_bytes()),
             burn_events_key: BytesView::from(info.burn_events().key().as_bytes()),
             preburn_events_key: BytesView::from(info.preburn_events().key().as_bytes()),
@@ -713,11 +677,11 @@ impl
         ),
     ) -> Result<StateProofView, Self::Error> {
         Ok(StateProofView {
-            ledger_info_with_signatures: BytesView::from(&lcs::to_bytes(
+            ledger_info_with_signatures: BytesView::from(&bcs::to_bytes(
                 &ledger_info_with_signatures,
             )?),
-            epoch_change_proof: BytesView::from(&lcs::to_bytes(&epoch_change_proof)?),
-            ledger_consistency_proof: BytesView::from(&lcs::to_bytes(&ledger_consistency_proof)?),
+            epoch_change_proof: BytesView::from(&bcs::to_bytes(&epoch_change_proof)?),
+            ledger_consistency_proof: BytesView::from(&bcs::to_bytes(&ledger_consistency_proof)?),
         })
     }
 }
@@ -736,7 +700,7 @@ impl TryFrom<AccountStateWithProof> for AccountStateWithProofView {
         account_state_with_proof: AccountStateWithProof,
     ) -> Result<AccountStateWithProofView, Error> {
         let blob = if let Some(account_blob) = account_state_with_proof.blob {
-            Some(BytesView::from(&lcs::to_bytes(&account_blob)?))
+            Some(BytesView::from(&bcs::to_bytes(&account_blob)?))
         } else {
             None
         };
@@ -760,17 +724,17 @@ impl TryFrom<AccountStateProof> for AccountStateProofView {
 
     fn try_from(account_state_proof: AccountStateProof) -> Result<AccountStateProofView, Error> {
         Ok(AccountStateProofView {
-            ledger_info_to_transaction_info_proof: BytesView::from(&lcs::to_bytes(
+            ledger_info_to_transaction_info_proof: BytesView::from(&bcs::to_bytes(
                 account_state_proof
                     .transaction_info_with_proof()
                     .ledger_info_to_transaction_info_proof(),
             )?),
-            transaction_info: BytesView::from(&lcs::to_bytes(
+            transaction_info: BytesView::from(&bcs::to_bytes(
                 account_state_proof
                     .transaction_info_with_proof()
                     .transaction_info(),
             )?),
-            transaction_info_to_account_proof: BytesView::from(&lcs::to_bytes(
+            transaction_info_to_account_proof: BytesView::from(&bcs::to_bytes(
                 account_state_proof.transaction_info_to_account_proof(),
             )?),
         })

@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
@@ -10,6 +10,7 @@ use std::fmt;
 
 pub mod access;
 pub mod check_bounds;
+pub mod compatibility;
 #[macro_use]
 pub mod errors;
 pub mod constant;
@@ -35,6 +36,7 @@ pub enum IndexKind {
     StructHandle,
     FunctionHandle,
     FieldHandle,
+    FriendDeclaration,
     FunctionInstantiation,
     FieldInstantiation,
     StructDefinition,
@@ -61,6 +63,7 @@ impl IndexKind {
             StructHandle,
             FunctionHandle,
             FieldHandle,
+            FriendDeclaration,
             StructDefInstantiation,
             FunctionInstantiation,
             FieldInstantiation,
@@ -87,6 +90,7 @@ impl fmt::Display for IndexKind {
             StructHandle => "struct handle",
             FunctionHandle => "function handle",
             FieldHandle => "field handle",
+            FriendDeclaration => "friend declaration",
             StructDefInstantiation => "struct instantiation",
             FunctionInstantiation => "function instantiation",
             FieldInstantiation => "field instantiation",

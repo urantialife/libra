@@ -1,5 +1,0 @@
-module Test {
-    import 0x1.LBR;
-    import 0x1.Libra;
-    resource T{fint: Libra.Libra<LBR.LBR>}
-}

@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
@@ -14,16 +14,16 @@ use crate::{
 };
 use anyhow::format_err;
 use async_trait::async_trait;
-use libra_logger::prelude::*;
-use libra_types::{
-    account_config::{lbr_type_tag, LBR_NAME},
+use diem_logger::prelude::*;
+use diem_types::{
+    account_config::{xus_tag, XUS_NAME},
     chain_id::ChainId,
     transaction::{helpers::create_user_txn, TransactionPayload},
 };
 use std::{collections::HashSet, fmt, time::Duration};
 use structopt::StructOpt;
 use transaction_builder::{
-    encode_peer_to_peer_with_metadata_script, encode_update_libra_version_script,
+    encode_peer_to_peer_with_metadata_script, encode_update_diem_version_script,
 };
 
 #[derive(StructOpt, Debug)]
@@ -95,6 +95,8 @@ impl Experiment for ValidatorVersioning {
                 &EmitJobRequest::for_instances(
                     context.cluster.validator_instances().to_vec(),
                     context.global_emit_job_request,
+                    0,
+                    0,
                 ),
                 150,
             )
@@ -116,7 +118,7 @@ impl Experiment for ValidatorVersioning {
         let account_2 = context.tx_emitter.take_account();
 
         let txn_payload = TransactionPayload::Script(encode_peer_to_peer_with_metadata_script(
-            lbr_type_tag(),
+            xus_tag(),
             account_2.address,
             1,
             vec![],
@@ -135,7 +137,7 @@ impl Experiment for ValidatorVersioning {
                 account.sequence_number,
                 123456,
                 0,
-                LBR_NAME.to_owned(),
+                XUS_NAME.to_owned(),
                 10,
                 ChainId::test(),
             )
@@ -163,16 +165,19 @@ impl Experiment for ValidatorVersioning {
             .await?;
 
         info!("5. Send a transaction to activate such feature");
-        let mut faucet_account = context.tx_emitter.load_faucet_account(&full_node).await?;
+        let mut faucet_account = context
+            .tx_emitter
+            .load_faucet_account(&full_node.json_rpc_client())
+            .await?;
         let allowed_nonce = 0;
         let update_txn = create_user_txn(
             &faucet_account.key_pair,
-            TransactionPayload::Script(encode_update_libra_version_script(allowed_nonce, 11)),
+            TransactionPayload::Script(encode_update_diem_version_script(allowed_nonce, 11)),
             faucet_account.address,
             faucet_account.sequence_number,
             123456,
             0,
-            LBR_NAME.to_owned(),
+            XUS_NAME.to_owned(),
             10,
             ChainId::test(),
         )
@@ -190,7 +195,7 @@ impl Experiment for ValidatorVersioning {
         let txn3 = txn_gen(&mut account_1)?;
 
         full_node_client
-            .submit_transaction(txn3.clone())
+            .submit(&txn3)
             .await
             .map_err(|e| format_err!("Transaction should pass the full node mempool: {}", e))?;
 
@@ -215,7 +220,7 @@ impl Experiment for ValidatorVersioning {
         info!("8. Send a transaction to make sure it gets dropped by the full node mempool.");
 
         let updated_full_node = context.cluster.random_fullnode_instance().json_rpc_client();
-        if updated_full_node.submit_transaction(txn3).await.is_ok() {
+        if updated_full_node.submit(&txn3).await.is_ok() {
             return Err(format_err!(
                 "Transaction should not be accepted by the full node."
             ));

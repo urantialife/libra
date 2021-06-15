@@ -1,24 +1,24 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{layout::Layout, storage_helper::StorageHelper};
-use config_builder::BuildSwarm;
-use libra_config::{
+use crate::{layout::Layout, storage_helper::StorageHelper, swarm_config::BuildSwarm};
+use diem_config::{
     config::{
         DiscoveryMethod, Identity, NodeConfig, OnDiskStorageConfig, SafetyRulesService,
-        SecureBackend, SeedAddresses, WaypointConfig, HANDSHAKE_VERSION,
+        SecureBackend, WaypointConfig,
     },
+    generator::build_seed_for_network,
     network_id::NetworkId,
 };
-use libra_crypto::ed25519::Ed25519PrivateKey;
-use libra_management::constants::{COMMON_NS, LAYOUT};
-use libra_secure_storage::{CryptoStorage, KVStorage};
-use libra_temppath::TempPath;
-use libra_types::chain_id::ChainId;
+use diem_crypto::ed25519::Ed25519PrivateKey;
+use diem_management::constants::{COMMON_NS, LAYOUT};
+use diem_secure_storage::{CryptoStorage, KVStorage, Storage};
+use diem_temppath::TempPath;
+use diem_types::{chain_id::ChainId, waypoint::Waypoint};
 use std::path::{Path, PathBuf};
 
-const LIBRA_ROOT_NS: &str = "libra_root";
-const LIBRA_ROOT_SHARED_NS: &str = "libra_root_shared";
+const DIEM_ROOT_NS: &str = "diem_root";
+const DIEM_ROOT_SHARED_NS: &str = "diem_root_shared";
 const OPERATOR_NS: &str = "_operator";
 const OPERATOR_SHARED_NS: &str = "_operator_shared";
 const OWNER_NS: &str = "_owner";
@@ -27,8 +27,9 @@ const OWNER_SHARED_NS: &str = "_owner_shared";
 pub struct ValidatorBuilder<T: AsRef<Path>> {
     storage_helper: StorageHelper,
     num_validators: usize,
-    template: NodeConfig,
+    randomize_first_validator_ports: bool,
     swarm_path: T,
+    template: NodeConfig,
 }
 
 impl<T: AsRef<Path>> ValidatorBuilder<T> {
@@ -36,9 +37,15 @@ impl<T: AsRef<Path>> ValidatorBuilder<T> {
         Self {
             storage_helper: StorageHelper::new(),
             num_validators,
-            template,
+            randomize_first_validator_ports: true,
             swarm_path,
+            template,
         }
+    }
+
+    pub fn randomize_first_validator_ports(mut self, value: bool) -> Self {
+        self.randomize_first_validator_ports = value;
+        self
     }
 
     fn secure_backend(&self, ns: &str, usage: &str) -> SecureBackend {
@@ -57,29 +64,31 @@ impl<T: AsRef<Path>> ValidatorBuilder<T> {
 
     /// Association uploads the validator layout to shared storage.
     fn create_layout(&self) {
-        let mut layout = Layout::default();
-        layout.libra_root = LIBRA_ROOT_SHARED_NS.into();
-        layout.treasury_compliance = LIBRA_ROOT_SHARED_NS.into();
-        layout.owners = (0..self.num_validators)
-            .map(|i| (i.to_string() + OWNER_SHARED_NS))
-            .collect();
-        layout.operators = (0..self.num_validators)
-            .map(|i| (i.to_string() + OPERATOR_SHARED_NS))
-            .collect();
+        let layout = Layout {
+            owners: (0..self.num_validators)
+                .map(|i| (i.to_string() + OWNER_SHARED_NS))
+                .collect(),
+            operators: (0..self.num_validators)
+                .map(|i| (i.to_string() + OPERATOR_SHARED_NS))
+                .collect(),
+            diem_root: DIEM_ROOT_SHARED_NS.into(),
+            treasury_compliance: DIEM_ROOT_SHARED_NS.into(),
+        };
 
         let mut common_storage = self.storage_helper.storage(COMMON_NS.into());
         let layout_value = layout.to_toml().unwrap();
         common_storage.set(LAYOUT, layout_value).unwrap();
     }
 
-    /// Root initializes libra root and treasury root keys.
+    /// Root initializes diem root and treasury root keys.
     fn create_root(&self) {
-        self.storage_helper.initialize(LIBRA_ROOT_NS.into());
         self.storage_helper
-            .libra_root_key(LIBRA_ROOT_NS, LIBRA_ROOT_SHARED_NS)
+            .initialize_by_idx(DIEM_ROOT_NS.into(), 0);
+        self.storage_helper
+            .diem_root_key(DIEM_ROOT_NS, DIEM_ROOT_SHARED_NS)
             .unwrap();
         self.storage_helper
-            .treasury_compliance_key(LIBRA_ROOT_NS, LIBRA_ROOT_SHARED_NS)
+            .treasury_compliance_key(DIEM_ROOT_NS, DIEM_ROOT_SHARED_NS)
             .unwrap();
     }
 
@@ -88,7 +97,8 @@ impl<T: AsRef<Path>> ValidatorBuilder<T> {
         let local_ns = index.to_string() + OWNER_NS;
         let remote_ns = index.to_string() + OWNER_SHARED_NS;
 
-        self.storage_helper.initialize(local_ns.clone());
+        self.storage_helper
+            .initialize_by_idx(local_ns.clone(), 1 + index);
         let _ = self
             .storage_helper
             .owner_key(&local_ns, &remote_ns)
@@ -100,7 +110,8 @@ impl<T: AsRef<Path>> ValidatorBuilder<T> {
         let local_ns = index.to_string() + OPERATOR_NS;
         let remote_ns = index.to_string() + OPERATOR_SHARED_NS;
 
-        self.storage_helper.initialize(local_ns.clone());
+        self.storage_helper
+            .initialize_by_idx(local_ns.clone(), self.num_validators + 1 + index);
         let _ = self
             .storage_helper
             .operator_key(&local_ns, &remote_ns)
@@ -122,7 +133,9 @@ impl<T: AsRef<Path>> ValidatorBuilder<T> {
         let remote_ns = index.to_string() + OPERATOR_SHARED_NS;
 
         let mut config = self.template.clone();
-        config.randomize_ports();
+        if index > 0 || self.randomize_first_validator_ports {
+            config.randomize_ports();
+        }
 
         let validator_network = config.validator_network.as_mut().unwrap();
         let validator_network_address = validator_network.listen_address.clone();
@@ -161,7 +174,7 @@ impl<T: AsRef<Path>> ValidatorBuilder<T> {
 
     /// Operators generate genesis from shared storage and verify against waypoint.
     /// Insert the genesis/waypoint into local config.
-    fn finish_validator_config(&self, index: usize, config: &mut NodeConfig) {
+    fn finish_validator_config(&self, index: usize, config: &mut NodeConfig, waypoint: Waypoint) {
         let local_ns = index.to_string() + OPERATOR_NS;
 
         let genesis_path = TempPath::new();
@@ -171,10 +184,10 @@ impl<T: AsRef<Path>> ValidatorBuilder<T> {
             .genesis(ChainId::test(), genesis_path.path())
             .unwrap();
 
-        let _ = self
-            .storage_helper
-            .create_and_insert_waypoint(ChainId::test(), &local_ns)
+        self.storage_helper
+            .insert_waypoint(&local_ns, waypoint)
             .unwrap();
+
         let output = self
             .storage_helper
             .verify_genesis(&local_ns, genesis_path.path())
@@ -185,7 +198,7 @@ impl<T: AsRef<Path>> ValidatorBuilder<T> {
         config.consensus.safety_rules.backend = self.secure_backend(&local_ns, "safety-rules");
         config.execution.backend = self.secure_backend(&local_ns, "execution");
 
-        let backend = self.secure_backend(&local_ns, "waypoint");
+        let backend = self.secure_backend(&local_ns, "safety-rules");
         config.base.waypoint = WaypointConfig::FromStorage(backend);
         config.execution.genesis = Some(genesis);
         config.execution.genesis_file_location = PathBuf::from("");
@@ -196,10 +209,10 @@ impl<T: AsRef<Path>> BuildSwarm for ValidatorBuilder<T> {
     fn build_swarm(&self) -> anyhow::Result<(Vec<NodeConfig>, Ed25519PrivateKey)> {
         self.create_layout();
         self.create_root();
-        let libra_root_key = self
+        let diem_root_key = self
             .storage_helper
-            .storage(LIBRA_ROOT_NS.into())
-            .export_private_key(libra_global_constants::LIBRA_ROOT_KEY)
+            .storage(DIEM_ROOT_NS.into())
+            .export_private_key(diem_global_constants::DIEM_ROOT_KEY)
             .unwrap();
 
         // Upload both owner and operator keys to shared storage
@@ -216,12 +229,16 @@ impl<T: AsRef<Path>> BuildSwarm for ValidatorBuilder<T> {
             configs.push(config);
         }
 
+        let waypoint = self
+            .storage_helper
+            .create_waypoint(ChainId::test())
+            .unwrap();
         // Create genesis and waypoint
         for (i, config) in configs.iter_mut().enumerate() {
-            self.finish_validator_config(i, config);
+            self.finish_validator_config(i, config, waypoint);
         }
 
-        Ok((configs, libra_root_key))
+        Ok((configs, diem_root_key))
     }
 }
 
@@ -233,7 +250,7 @@ pub enum FullnodeType {
 
 pub struct FullnodeBuilder {
     validator_config_path: Vec<PathBuf>,
-    libra_root_key_path: PathBuf,
+    diem_root_key_path: PathBuf,
     template: NodeConfig,
     build_type: FullnodeType,
 }
@@ -241,13 +258,13 @@ pub struct FullnodeBuilder {
 impl FullnodeBuilder {
     pub fn new(
         validator_config_path: Vec<PathBuf>,
-        libra_root_key_path: PathBuf,
+        diem_root_key_path: PathBuf,
         template: NodeConfig,
         build_type: FullnodeType,
     ) -> Self {
         Self {
             validator_config_path,
-            libra_root_key_path,
+            diem_root_key_path,
             template,
             build_type,
         }
@@ -275,21 +292,14 @@ impl FullnodeBuilder {
 
         // Now let's prepare the full nodes internal network to communicate with the validators
         // internal network
-
-        let v_vfn_network_address = v_vfn.listen_address.clone();
-        let v_vfn_pub_key = v_vfn.identity_key().public_key();
-        let v_vfn_network_address =
-            v_vfn_network_address.append_prod_protos(v_vfn_pub_key, HANDSHAKE_VERSION);
-        let v_vfn_id = v_vfn.peer_id();
-        let mut seed_addrs = SeedAddresses::default();
-        seed_addrs.insert(v_vfn_id, vec![v_vfn_network_address]);
+        let seeds = build_seed_for_network(v_vfn);
 
         let fn_vfn = &mut full_node_config
             .full_node_networks
             .iter_mut()
-            .find(|n| matches!(n.network_id, NetworkId::Private(_)))
+            .find(|n| n.network_id.is_vfn_network())
             .expect("vfn missing vfn full node network in config");
-        fn_vfn.seed_addrs = seed_addrs;
+        fn_vfn.seeds = seeds;
 
         Self::insert_waypoint_and_genesis(&mut full_node_config, &validator_config);
         full_node_config
@@ -335,7 +345,60 @@ impl BuildSwarm for FullnodeBuilder {
             FullnodeType::ValidatorFullnode => self.build_vfn(),
             FullnodeType::PublicFullnode(num_nodes) => self.build_public_fn(num_nodes),
         }?;
-        let libra_root_key_path = generate_key::load_key(&self.libra_root_key_path);
-        Ok((configs, libra_root_key_path))
+        let diem_root_key_path = generate_key::load_key(&self.diem_root_key_path);
+        Ok((configs, diem_root_key_path))
     }
+}
+
+pub fn test_config() -> (NodeConfig, Ed25519PrivateKey) {
+    let path = TempPath::new();
+    path.create_as_dir().unwrap();
+    let builder = ValidatorBuilder::new(1, NodeConfig::default_for_validator(), path.path());
+    let (mut configs, key) = builder.build_swarm().unwrap();
+
+    let mut config = configs.swap_remove(0);
+    config.set_data_dir(path.path().to_path_buf());
+    let backend = &config
+        .validator_network
+        .as_ref()
+        .unwrap()
+        .identity_from_storage()
+        .backend;
+    let storage: Storage = std::convert::TryFrom::try_from(backend).unwrap();
+    let mut test = diem_config::config::TestConfig::new_with_temp_dir(Some(path));
+    test.execution_key(
+        storage
+            .export_private_key(diem_global_constants::EXECUTION_KEY)
+            .unwrap(),
+    );
+    test.operator_key(
+        storage
+            .export_private_key(diem_global_constants::OPERATOR_KEY)
+            .unwrap(),
+    );
+    test.owner_key(
+        storage
+            .export_private_key(diem_global_constants::OWNER_KEY)
+            .unwrap(),
+    );
+    config.test = Some(test);
+
+    let owner_account = storage
+        .get(diem_global_constants::OWNER_ACCOUNT)
+        .unwrap()
+        .value;
+    let mut sr_test = diem_config::config::SafetyRulesTestConfig::new(owner_account);
+    sr_test.consensus_key(
+        storage
+            .export_private_key(diem_global_constants::CONSENSUS_KEY)
+            .unwrap(),
+    );
+    sr_test.execution_key(
+        storage
+            .export_private_key(diem_global_constants::EXECUTION_KEY)
+            .unwrap(),
+    );
+    config.consensus.safety_rules.test = Some(sr_test);
+
+    (config, key)
 }

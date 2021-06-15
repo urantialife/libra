@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::account_address::AccountAddress;
@@ -8,7 +8,11 @@ use proptest_derive::Arbitrary;
 #[cfg(any(test, feature = "fuzzing"))]
 use rand::{rngs::OsRng, RngCore};
 use serde::{de, ser, Deserialize, Serialize};
-use std::{convert::TryFrom, fmt};
+use std::{
+    convert::{TryFrom, TryInto},
+    fmt,
+    str::FromStr,
+};
 
 /// A struct that represents a globally unique id for an Event stream that a user can listen to.
 /// By design, the lower part of EventKey is the same as account address.
@@ -37,10 +41,13 @@ impl EventKey {
 
     /// Get the account address part in this event key
     pub fn get_creator_address(&self) -> AccountAddress {
-        let mut arr_bytes = [0u8; AccountAddress::LENGTH];
-        arr_bytes.copy_from_slice(&self.0[EventKey::LENGTH - AccountAddress::LENGTH..]);
+        AccountAddress::try_from(&self.0[EventKey::LENGTH - AccountAddress::LENGTH..])
+            .expect("get_creator_address failed")
+    }
 
-        AccountAddress::new(arr_bytes)
+    /// If this is the `ith` EventKey` created by `get_creator_address()`, return `i`
+    pub fn get_creation_number(&self) -> u64 {
+        u64::from_le_bytes(self.0[0..8].try_into().unwrap())
     }
 
     #[cfg(any(test, feature = "fuzzing"))]
@@ -58,6 +65,15 @@ impl EventKey {
         lhs.copy_from_slice(&salt.to_le_bytes());
         rhs.copy_from_slice(addr.as_ref());
         EventKey(output_bytes)
+    }
+}
+
+impl FromStr for EventKey {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let bytes_out = ::hex::decode(s)?;
+        EventKey::try_from(bytes_out.as_slice())
     }
 }
 

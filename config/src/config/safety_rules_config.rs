@@ -1,13 +1,12 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
     config::{LoggerConfig, SecureBackend},
     keys::ConfigKey,
 };
-use libra_crypto::{ed25519::Ed25519PrivateKey, Uniform};
-use libra_network_address::NetworkAddress;
-use libra_types::{waypoint::Waypoint, PeerId};
+use diem_crypto::{ed25519::Ed25519PrivateKey, Uniform};
+use diem_types::{network_address::NetworkAddress, waypoint::Waypoint, PeerId};
 use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -23,8 +22,10 @@ pub struct SafetyRulesConfig {
     pub service: SafetyRulesService,
     pub test: Option<SafetyRulesTestConfig>,
     pub verify_vote_proposal_signature: bool,
+    pub export_consensus_key: bool,
     // Read/Write/Connect networking operation timeout in milliseconds.
     pub network_timeout_ms: u64,
+    pub enable_cached_safety_data: bool,
 }
 
 impl Default for SafetyRulesConfig {
@@ -35,8 +36,10 @@ impl Default for SafetyRulesConfig {
             service: SafetyRulesService::Thread,
             test: None,
             verify_vote_proposal_signature: true,
-            // Default value of 30seconds for a timeout
+            export_consensus_key: false,
+            // Default value of 30 seconds for a timeout
             network_timeout_ms: 30_000,
+            enable_cached_safety_data: true,
         }
     }
 }
@@ -96,6 +99,14 @@ impl SafetyRulesTestConfig {
             execution_key: None,
             waypoint: None,
         }
+    }
+
+    pub fn consensus_key(&mut self, key: Ed25519PrivateKey) {
+        self.consensus_key = Some(ConfigKey::new(key));
+    }
+
+    pub fn execution_key(&mut self, key: Ed25519PrivateKey) {
+        self.execution_key = Some(ConfigKey::new(key));
     }
 
     pub fn random_consensus_key(&mut self, rng: &mut StdRng) {

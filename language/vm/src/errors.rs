@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
@@ -169,6 +169,25 @@ pub struct PartialVMError {
 }
 
 impl PartialVMError {
+    pub fn all_data(
+        self,
+    ) -> (
+        StatusCode,
+        Option<u64>,
+        Option<String>,
+        Vec<(IndexKind, TableIndex)>,
+        Vec<(FunctionDefinitionIndex, CodeOffset)>,
+    ) {
+        let PartialVMError {
+            major_status,
+            sub_status,
+            message,
+            indices,
+            offsets,
+        } = self;
+        (major_status, sub_status, message, indices, offsets)
+    }
+
     pub fn finish(self, location: Location) -> VMError {
         let PartialVMError {
             major_status,

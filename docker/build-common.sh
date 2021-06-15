@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (c) The Libra Core Contributors
+# Copyright (c) The Diem Core Contributors
 # SPDX-License-Identifier: Apache-2.0
 set -e
 
@@ -14,31 +14,39 @@ export CARGO=$(rustup which --toolchain $RUST_NIGHTLY cargo)
 export CARGOFLAGS=$(cat cargo-flags)
 export CARGO_PROFILE_RELEASE_LTO=thin # override lto setting to turn on thin-LTO for release builds
 
-# Build release binaries
+# Disable the workspace-hack package to prevent extra features and packages from being enabled.
+# Can't use ${CARGO} because of https://github.com/rust-lang/rustup/issues/2647 and
+# https://github.com/env-logger-rs/env_logger/issues/190.
+# TODO: consider using ${CARGO} once upstream issues are fixed.
+cargo x generate-workspace-hack --mode disable
+
+# Build release binaries (TODO: use x to run this?)
 ${CARGO} ${CARGOFLAGS} build --release \
-         -p libra-genesis-tool \
-         -p libra-operational-tool \
-         -p libra-node \
-         -p config-builder \
-         -p libra-key-manager \
+         -p diem-genesis-tool \
+         -p diem-operational-tool \
+         -p diem-node \
+         -p diem-key-manager \
          -p safety-rules \
          -p db-bootstrapper \
          -p backup-cli \
+         -p diem-transaction-replay \
+         -p diem-writeset-generator \
          "$@"
 
-# Build and overwrite the libra-node binary with feature failpoints if $ENABLE_FAILPOINTS is configured
+# Build and overwrite the diem-node binary with feature failpoints if $ENABLE_FAILPOINTS is configured
 if [ "$ENABLE_FAILPOINTS" = "1" ]; then
-  echo "Building libra-node with failpoints feature"
-  (cd libra-node && ${CARGO} ${CARGOFLAGS} build --release --features failpoints "$@")
+  echo "Building diem-node with failpoints feature"
+  (cd diem-node && ${CARGO} ${CARGOFLAGS} build --release --features failpoints "$@")
 fi
 
 # These non-release binaries are built separately to avoid feature unification issues
 ${CARGO} ${CARGOFLAGS} build --release \
          -p cluster-test \
          -p cli \
+         -p diem-faucet \
          "$@"
 
 rm -rf target/release/{build,deps,incremental}
 
-STRIP_DIR=${STRIP_DIR:-/libra/target}
-find "$STRIP_DIR/release" -maxdepth 1 -executable -type f | grep -Ev 'libra-node|safety-rules' | xargs strip
+STRIP_DIR=${STRIP_DIR:-/diem/target}
+find "$STRIP_DIR/release" -maxdepth 1 -executable -type f | grep -Ev 'diem-node|safety-rules' | xargs strip

@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 //! This module defines physical storage schema for consensus block.
@@ -12,16 +12,15 @@
 use super::BLOCK_CF_NAME;
 use anyhow::Result;
 use consensus_types::block::Block;
-use libra_crypto::HashValue;
+use diem_crypto::HashValue;
 use schemadb::schema::{KeyCodec, Schema, ValueCodec};
-use std::{cmp, fmt};
 
 pub struct BlockSchema;
 
 impl Schema for BlockSchema {
     const COLUMN_FAMILY_NAME: schemadb::ColumnFamilyName = BLOCK_CF_NAME;
     type Key = HashValue;
-    type Value = SchemaBlock;
+    type Value = Block;
 }
 
 impl KeyCodec<BlockSchema> for HashValue {
@@ -34,41 +33,13 @@ impl KeyCodec<BlockSchema> for HashValue {
     }
 }
 
-#[derive(Clone)]
-/// SchemaBlock is a crate wrapper for Block that is defined outside this crate.
-/// ValueCodec cannot be implemented for Block here as Block is defined in
-/// consensus_types crate (E0210).
-pub struct SchemaBlock(Block);
-
-impl SchemaBlock {
-    pub fn from_block(sb: Block) -> SchemaBlock {
-        Self(sb)
-    }
-
-    pub fn borrow_into_block(&self) -> &Block {
-        &self.0
-    }
-}
-
-impl cmp::PartialEq for SchemaBlock {
-    fn eq(&self, other: &SchemaBlock) -> bool {
-        self.borrow_into_block().eq(&other.borrow_into_block())
-    }
-}
-
-impl fmt::Debug for SchemaBlock {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.borrow_into_block().fmt(f)
-    }
-}
-
-impl ValueCodec<BlockSchema> for SchemaBlock {
+impl ValueCodec<BlockSchema> for Block {
     fn encode_value(&self) -> Result<Vec<u8>> {
-        Ok(lcs::to_bytes(&self.0)?)
+        Ok(bcs::to_bytes(&self)?)
     }
 
     fn decode_value(data: &[u8]) -> Result<Self> {
-        Ok(SchemaBlock(lcs::from_bytes(data)?))
+        Ok(bcs::from_bytes(data)?)
     }
 }
 

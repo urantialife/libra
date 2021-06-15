@@ -1,22 +1,22 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 //! Integration tests for validator_network.
 
 use crate::builder::NetworkBuilder;
 use channel::message_queues::QueueStyle;
-use futures::{executor::block_on, StreamExt};
-use libra_config::{
-    config::RoleType,
+use diem_config::{
+    config::{Peer, PeerRole, PeerSet, RoleType, NETWORK_CHANNEL_SIZE},
     network_id::{NetworkContext, NetworkId},
 };
-use libra_crypto::{test_utils::TEST_SEED, x25519, Uniform};
-use libra_metrics::IntCounterVec;
-use libra_network_address::NetworkAddress;
-use libra_types::{chain_id::ChainId, PeerId};
+use diem_crypto::{test_utils::TEST_SEED, x25519, Uniform};
+use diem_infallible::RwLock;
+use diem_metrics::IntCounterVec;
+use diem_time_service::TimeService;
+use diem_types::{chain_id::ChainId, network_address::NetworkAddress, PeerId};
+use futures::{executor::block_on, StreamExt};
 use netcore::transport::ConnectionOrigin;
 use network::{
-    constants,
     error::NetworkError,
     peer_manager::{
         builder::AuthenticationMode, ConnectionRequestSender, PeerManagerRequestSender,
@@ -31,7 +31,7 @@ use rand::{rngs::StdRng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, RwLock},
+    sync::Arc,
     time::Duration,
 };
 use tokio::runtime::Runtime;
@@ -53,7 +53,7 @@ pub fn network_endpoint_config() -> (
         vec![TEST_RPC_PROTOCOL],
         vec![TEST_DIRECT_SEND_PROTOCOL],
         QueueStyle::LIFO,
-        constants::NETWORK_CHANNEL_SIZE,
+        NETWORK_CHANNEL_SIZE,
         None,
     )
 }
@@ -110,6 +110,7 @@ pub struct DummyNetwork {
 /// The following sets up a 2 peer network and verifies connectivity.
 pub fn setup_network() -> DummyNetwork {
     let runtime = Runtime::new().unwrap();
+    let role = RoleType::Validator;
     let network_id = NetworkId::Validator;
     let chain_id = ChainId::default();
     let dialer_peer_id = PeerId::random();
@@ -123,99 +124,93 @@ pub fn setup_network() -> DummyNetwork {
 
     // Setup keys for listener.
     let listener_identity_private_key = x25519::PrivateKey::generate(&mut rng);
-    let listener_identity_public_key = listener_identity_private_key.public_key();
-    let listener_pubkeys: HashSet<_> = vec![listener_identity_public_key].into_iter().collect();
 
     // Setup listen addresses
     let dialer_addr: NetworkAddress = "/ip4/127.0.0.1/tcp/0".parse().unwrap();
     let listener_addr: NetworkAddress = "/ip4/127.0.0.1/tcp/0".parse().unwrap();
 
-    // Setup trusted peers.
-    let seed_pubkeys: HashMap<_, _> = vec![
-        (dialer_peer_id, dialer_pubkeys),
-        (listener_peer_id, listener_pubkeys),
-    ]
-    .into_iter()
-    .collect();
-    let trusted_peers = Arc::new(RwLock::new(HashMap::new()));
+    // Setup seed peers
+    let mut seeds = PeerSet::new();
+    seeds.insert(
+        dialer_peer_id,
+        Peer::new(vec![], dialer_pubkeys, PeerRole::Validator),
+    );
 
+    let trusted_peers = Arc::new(RwLock::new(HashMap::new()));
     let authentication_mode = AuthenticationMode::Mutual(listener_identity_private_key);
 
     // Set up the listener network
     let network_context = Arc::new(NetworkContext::new(
+        role,
         network_id.clone(),
-        RoleType::Validator,
         listener_peer_id,
     ));
-    let mut network_builder = NetworkBuilder::new(
+    let mut network_builder = NetworkBuilder::new_for_test(
         chain_id,
-        trusted_peers.clone(),
+        &seeds,
+        trusted_peers,
         network_context,
+        TimeService::real(),
         listener_addr,
         authentication_mode,
-        constants::MAX_FRAME_SIZE,
     );
-    network_builder.add_connectivity_manager(
-        HashMap::new(),
-        seed_pubkeys.clone(),
-        trusted_peers,
-        constants::MAX_FULLNODE_CONNECTIONS,
-        constants::MAX_CONNECTION_DELAY_MS,
-        constants::CONNECTIVITY_CHECK_INTERNAL_MS,
-        constants::NETWORK_CHANNEL_SIZE,
-    );
+
     let (listener_sender, mut listener_events) = network_builder
         .add_protocol_handler::<DummyNetworkSender, DummyNetworkEvents>(network_endpoint_config());
     network_builder.build(runtime.handle().clone()).start();
+
+    // Add the listener address with port
     let listener_addr = network_builder.listen_address();
+    seeds.insert(
+        listener_peer_id,
+        Peer::from_addrs(PeerRole::Validator, vec![listener_addr]),
+    );
 
     let authentication_mode = AuthenticationMode::Mutual(dialer_identity_private_key);
-    let seed_addrs: HashMap<_, _> = [(listener_peer_id, vec![listener_addr])]
-        .iter()
-        .cloned()
-        .collect();
 
     // Set up the dialer network
-    let network_context = Arc::new(NetworkContext::new(
-        network_id,
-        RoleType::Validator,
-        dialer_peer_id,
-    ));
+    let network_context = Arc::new(NetworkContext::new(role, network_id, dialer_peer_id));
 
     let trusted_peers = Arc::new(RwLock::new(HashMap::new()));
 
-    let mut network_builder = NetworkBuilder::new(
+    let mut network_builder = NetworkBuilder::new_for_test(
         chain_id,
-        trusted_peers.clone(),
+        &seeds,
+        trusted_peers,
         network_context,
+        TimeService::real(),
         dialer_addr,
         authentication_mode,
-        constants::MAX_FRAME_SIZE,
     );
-    network_builder.add_connectivity_manager(
-        seed_addrs,
-        seed_pubkeys,
-        trusted_peers,
-        constants::MAX_FULLNODE_CONNECTIONS,
-        constants::MAX_CONNECTION_DELAY_MS,
-        constants::CONNECTIVITY_CHECK_INTERNAL_MS,
-        constants::NETWORK_CHANNEL_SIZE,
-    );
+
     let (dialer_sender, mut dialer_events) = network_builder
         .add_protocol_handler::<DummyNetworkSender, DummyNetworkEvents>(network_endpoint_config());
     network_builder.build(runtime.handle().clone()).start();
 
     // Wait for establishing connection
-    let first_dialer_event = block_on(dialer_events.next()).unwrap().unwrap();
-    assert_eq!(
-        first_dialer_event,
-        Event::NewPeer(listener_peer_id, ConnectionOrigin::Outbound)
-    );
-    let first_listener_event = block_on(listener_events.next()).unwrap().unwrap();
-    assert_eq!(
-        first_listener_event,
-        Event::NewPeer(dialer_peer_id, ConnectionOrigin::Inbound)
-    );
+    let first_dialer_event = block_on(dialer_events.next()).unwrap();
+    if let Event::NewPeer(metadata) = first_dialer_event {
+        assert_eq!(metadata.remote_peer_id, listener_peer_id);
+        assert_eq!(metadata.origin, ConnectionOrigin::Outbound);
+        assert_eq!(metadata.role, PeerRole::Validator);
+    } else {
+        panic!(
+            "No NewPeer event on dialer received instead: {:?}",
+            first_dialer_event
+        );
+    }
+
+    let first_listener_event = block_on(listener_events.next()).unwrap();
+    if let Event::NewPeer(metadata) = first_listener_event {
+        assert_eq!(metadata.remote_peer_id, dialer_peer_id);
+        assert_eq!(metadata.origin, ConnectionOrigin::Inbound);
+        assert_eq!(metadata.role, PeerRole::Validator);
+    } else {
+        panic!(
+            "No NewPeer event on listener received instead: {:?}",
+            first_listener_event
+        );
+    }
 
     DummyNetwork {
         runtime,

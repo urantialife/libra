@@ -1,11 +1,20 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Key-Value definitions
+//! Key-Value definitions for macros
+//!
+//! Example:
+//! ```
+//! use diem_logger::info;
+//! info!(
+//!   key = "value"
+//! );
+//! ```
 
 use serde::Serialize;
 use std::fmt;
 
+/// The key part of a logging key value pair e.g. `info!(key = value)`
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize)]
 pub struct Key(&'static str);
 
@@ -19,6 +28,7 @@ impl Key {
     }
 }
 
+/// The value part of a logging key value pair e.g. `info!(key = value)`
 #[derive(Clone, Copy)]
 pub enum Value<'v> {
     Debug(&'v (dyn fmt::Debug)),
@@ -31,7 +41,9 @@ impl<'v> fmt::Debug for Value<'v> {
         match &self {
             Value::Debug(d) => fmt::Debug::fmt(d, f),
             Value::Display(d) => fmt::Display::fmt(d, f),
-            Value::Serde(s) => fmt::Debug::fmt(&serde_json::to_value(s).unwrap(), f),
+            Value::Serde(s) => {
+                fmt::Debug::fmt(&serde_json::to_value(s).map_err(|_| fmt::Error)?, f)
+            }
         }
     }
 }
@@ -53,6 +65,7 @@ impl<'v> Value<'v> {
     }
 }
 
+/// The logging key value pair e.g. `info!(key = value)`
 #[derive(Clone, Debug)]
 pub struct KeyValue<'v> {
     key: Key,

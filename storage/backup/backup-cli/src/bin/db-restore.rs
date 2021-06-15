@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
@@ -10,12 +10,11 @@ use backup_cli::{
     },
     coordinators::restore::{RestoreCoordinator, RestoreCoordinatorOpt},
     storage::StorageOpt,
-    utils::GlobalRestoreOpt,
+    utils::{GlobalRestoreOpt, GlobalRestoreOptions},
 };
-use libra_logger::{prelude::*, Level, Logger};
-use libra_secure_push_metrics::MetricsPusher;
-use libradb::{GetRestoreHandler, LibraDB};
-use std::sync::Arc;
+use diem_logger::{prelude::*, Level, Logger};
+use diem_secure_push_metrics::MetricsPusher;
+use std::convert::TryInto;
 use structopt::StructOpt;
 
 #[derive(StructOpt)]
@@ -64,38 +63,24 @@ async fn main() -> Result<()> {
 }
 
 async fn main_impl() -> Result<()> {
-    Logger::new().level(Level::Info).init();
+    Logger::new().level(Level::Info).read_env().init();
     let _mp = MetricsPusher::start();
 
     let opt = Opt::from_args();
-    let db = Arc::new(
-        LibraDB::open(
-            &opt.global.db_dir,
-            false, /* read_only */
-            None,  /* pruner */
-        )
-        .expect("Failed opening DB."),
-    );
-    let restore_handler = Arc::new(db.get_restore_handler());
+    let global_opt: GlobalRestoreOptions = opt.global.clone().try_into()?;
 
-    let global_opt = opt.global;
     match opt.restore_type {
         RestoreType::EpochEnding { opt, storage } => {
-            EpochEndingRestoreController::new(
-                opt,
-                global_opt,
-                storage.init_storage().await?,
-                restore_handler,
-            )
-            .run()
-            .await?;
+            EpochEndingRestoreController::new(opt, global_opt, storage.init_storage().await?)
+                .run(None)
+                .await?;
         }
         RestoreType::StateSnapshot { opt, storage } => {
             StateSnapshotRestoreController::new(
                 opt,
                 global_opt,
                 storage.init_storage().await?,
-                restore_handler,
+                None, /* epoch_history */
             )
             .run()
             .await?;
@@ -105,20 +90,15 @@ async fn main_impl() -> Result<()> {
                 opt,
                 global_opt,
                 storage.init_storage().await?,
-                restore_handler,
+                None, /* epoch_history */
             )
             .run()
             .await?;
         }
         RestoreType::Auto { opt, storage } => {
-            RestoreCoordinator::new(
-                opt,
-                global_opt,
-                storage.init_storage().await?,
-                restore_handler,
-            )
-            .run()
-            .await?;
+            RestoreCoordinator::new(opt, global_opt, storage.init_storage().await?)
+                .run()
+                .await?;
         }
     }
 

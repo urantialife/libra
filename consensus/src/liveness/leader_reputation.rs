@@ -1,14 +1,22 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::liveness::proposer_election::{next, ProposerElection};
-use consensus_types::common::{Author, Round};
-use libra_logger::prelude::*;
-use libra_types::block_metadata::{new_block_event_key, NewBlockEvent};
+use crate::{
+    counters::{COMMITTED_PROPOSALS_IN_WINDOW, COMMITTED_VOTES_IN_WINDOW},
+    liveness::proposer_election::{next, ProposerElection},
+};
+use consensus_types::{
+    block::Block,
+    common::{Author, Round},
+};
+use diem_crypto::HashValue;
+use diem_infallible::Mutex;
+use diem_logger::prelude::*;
+use diem_types::block_metadata::{new_block_event_key, NewBlockEvent};
 use std::{
     cmp::Ordering,
-    collections::HashSet,
-    sync::{Arc, Mutex},
+    collections::{HashMap, HashSet},
+    sync::Arc,
 };
 use storage_interface::{DbReader, Order};
 
@@ -19,17 +27,17 @@ pub trait MetadataBackend: Send + Sync {
     fn get_block_metadata(&self, target_round: Round) -> Vec<NewBlockEvent>;
 }
 
-pub struct LibraDBBackend {
+pub struct DiemDBBackend {
     window_size: usize,
-    libra_db: Arc<dyn DbReader>,
+    diem_db: Arc<dyn DbReader>,
     window: Mutex<Vec<(u64, NewBlockEvent)>>,
 }
 
-impl LibraDBBackend {
-    pub fn new(window_size: usize, libra_db: Arc<dyn DbReader>) -> Self {
+impl DiemDBBackend {
+    pub fn new(window_size: usize, diem_db: Arc<dyn DbReader>) -> Self {
         Self {
             window_size,
-            libra_db,
+            diem_db,
             window: Mutex::new(vec![]),
         }
     }
@@ -37,7 +45,7 @@ impl LibraDBBackend {
     fn refresh_window(&self, target_round: Round) -> anyhow::Result<()> {
         // assumes target round is not too far from latest commit
         let buffer = 10;
-        let events = self.libra_db.get_events(
+        let events = self.diem_db.get_events(
             &new_block_event_key(),
             u64::max_value(),
             Order::Descending,
@@ -45,37 +53,37 @@ impl LibraDBBackend {
         )?;
         let mut result = vec![];
         for (v, e) in events {
-            let e = lcs::from_bytes::<NewBlockEvent>(e.event_data())?;
+            let e = bcs::from_bytes::<NewBlockEvent>(e.event_data())?;
             if e.round() <= target_round && result.len() < self.window_size {
                 result.push((v, e));
             }
         }
-        *self.window.lock().unwrap() = result;
+        *self.window.lock() = result;
         Ok(())
     }
 }
 
-impl MetadataBackend for LibraDBBackend {
+impl MetadataBackend for DiemDBBackend {
     // assume the target_round only increases
     fn get_block_metadata(&self, target_round: Round) -> Vec<NewBlockEvent> {
         let (known_version, known_round) = self
             .window
             .lock()
-            .unwrap()
             .first()
             .map(|(v, e)| (*v, e.round()))
             .unwrap_or((0, 0));
         if !(known_round == target_round
-            || known_version == self.libra_db.get_latest_version().unwrap_or(0))
+            || known_version == self.diem_db.get_latest_version().unwrap_or(0))
         {
             if let Err(e) = self.refresh_window(target_round) {
-                error!("[leader reputation] Fail to refresh window: {:?}", e);
+                error!(
+                    error = ?e, "[leader reputation] Fail to refresh window",
+                );
                 return vec![];
             }
         }
         self.window
             .lock()
-            .unwrap()
             .clone()
             .into_iter()
             .map(|(_, e)| e)
@@ -91,13 +99,15 @@ pub trait ReputationHeuristic: Send + Sync {
 
 /// If candidate appear in the history, it's assigned active_weight otherwise inactive weight.
 pub struct ActiveInactiveHeuristic {
+    author: Author,
     active_weight: u64,
     inactive_weight: u64,
 }
 
 impl ActiveInactiveHeuristic {
-    pub fn new(active_weight: u64, inactive_weight: u64) -> Self {
+    pub fn new(author: Author, active_weight: u64, inactive_weight: u64) -> Self {
         Self {
+            author,
             active_weight,
             inactive_weight,
         }
@@ -106,11 +116,30 @@ impl ActiveInactiveHeuristic {
 
 impl ReputationHeuristic for ActiveInactiveHeuristic {
     fn get_weights(&self, candidates: &[Author], history: &[NewBlockEvent]) -> Vec<u64> {
+        let mut committed_proposals: usize = 0;
+        let mut committed_votes: usize = 0;
+
         let set = history.iter().fold(HashSet::new(), |mut set, meta| {
             set.insert(meta.proposer());
-            set.extend(meta.votes().into_iter());
+            for vote in meta.votes() {
+                set.insert(vote);
+                if vote == self.author {
+                    committed_votes = committed_votes
+                        .checked_add(1)
+                        .expect("Should not overflow the number of committed votes in a window");
+                }
+            }
+            if meta.proposer() == self.author {
+                committed_proposals = committed_proposals
+                    .checked_add(1)
+                    .expect("Should not overflow the number of committed proposals in a window");
+            }
             set
         });
+
+        COMMITTED_PROPOSALS_IN_WINDOW.set(committed_proposals as i64);
+        COMMITTED_VOTES_IN_WINDOW.set(committed_votes as i64);
+
         candidates
             .iter()
             .map(|author| {
@@ -130,6 +159,7 @@ pub struct LeaderReputation {
     proposers: Vec<Author>,
     backend: Box<dyn MetadataBackend>,
     heuristic: Box<dyn ReputationHeuristic>,
+    already_proposed: Mutex<(Round, HashMap<Author, HashValue>)>,
 }
 
 impl LeaderReputation {
@@ -142,6 +172,7 @@ impl LeaderReputation {
             proposers,
             backend,
             heuristic,
+            already_proposed: Mutex::new((0, HashMap::new())),
         }
     }
 }
@@ -170,5 +201,44 @@ impl ProposerElection for LeaderReputation {
             })
             .unwrap_err();
         self.proposers[chosen_index]
+    }
+
+    /// This function will return true for at most one proposal per valid proposer for a given round.
+    fn is_valid_proposal(&self, block: &Block) -> bool {
+        block.author().map_or(false, |author| {
+            let valid = self.is_valid_proposer(author, block.round());
+            let mut already_proposed = self.already_proposed.lock();
+            if !valid {
+                return false;
+            }
+            // detect if the leader proposes more than once in this round
+            match block.round().cmp(&already_proposed.0) {
+                Ordering::Greater => {
+                    already_proposed.0 = block.round();
+                    already_proposed.1.clear();
+                    already_proposed.1.insert(author, block.id());
+                    true
+                }
+                Ordering::Equal => {
+                    if already_proposed
+                        .1
+                        .get(&author)
+                        .map_or(false, |id| *id != block.id())
+                    {
+                        error!(
+                            SecurityEvent::InvalidConsensusProposal,
+                            "Multiple proposals from {} for round {}",
+                            author,
+                            block.round()
+                        );
+                        false
+                    } else {
+                        already_proposed.1.insert(author, block.id());
+                        true
+                    }
+                }
+                Ordering::Less => false,
+            }
+        })
     }
 }

@@ -1,18 +1,18 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 #[allow(unused_imports)]
 use log::{debug, info, warn};
 
 use anyhow::bail;
+use diem_types::transaction::{ArgumentABI, ScriptABI, TypeArgumentABI};
 use heck::SnakeCase;
-use libra_types::transaction::{ArgumentABI, ScriptABI, TypeArgumentABI};
 use move_core_types::language_storage::TypeTag;
-use serde::{Deserialize, Serialize};
-use spec_lang::{
-    env::{GlobalEnv, ModuleEnv},
+use move_model::{
+    model::{GlobalEnv, ModuleEnv},
     ty,
 };
+use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, io::Read, path::PathBuf};
 
 /// Options passed into the ABI generator.
@@ -60,7 +60,7 @@ impl<'env> Abigen<'env> {
         std::mem::take(&mut self.output)
             .into_iter()
             .map(|(path, abi)| {
-                let content = lcs::to_bytes(&abi).expect("ABI serialization should not fail");
+                let content = bcs::to_bytes(&abi).expect("ABI serialization should not fail");
                 (path, content)
             })
             .collect()
@@ -69,7 +69,7 @@ impl<'env> Abigen<'env> {
     /// Generates ABIs for all script modules in the environment (excluding the dependency set).
     pub fn gen(&mut self) {
         for module in self.env.get_modules() {
-            if module.is_script_module() && !module.is_dependency() {
+            if module.is_script_module() && module.is_target() {
                 let mut path = PathBuf::from(&self.options.output_directory);
                 path.push(
                     PathBuf::from(module.get_source_path())
@@ -155,7 +155,9 @@ impl<'env> Abigen<'env> {
                     U128 => TypeTag::U128,
                     Address => TypeTag::Address,
                     Signer => TypeTag::Signer,
-                    Num | Range | TypeValue => bail!("Type {:?} is not allowed in scripts.", ty0),
+                    Num | Range | TypeValue | EventStore => {
+                        bail!("Type {:?} is not allowed in scripts.", ty0)
+                    }
                 }
             }
             Reference(_, _) => {
@@ -171,6 +173,7 @@ impl<'env> Abigen<'env> {
             | TypeParameter(_)
             | Fun(_, _)
             | TypeDomain(_)
+            | ResourceDomain(..)
             | TypeLocal(_)
             | Error
             | Var(_) => bail!("Type {:?} is not allowed in scripts.", ty0),

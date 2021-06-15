@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
@@ -103,6 +103,7 @@ fn new_command(input: &str) -> Option<RawCommand> {
 
 pub fn extract_global_config(
     lines: impl IntoIterator<Item = impl AsRef<str>>,
+    exp_mode: bool,
 ) -> Result<GlobalConfig> {
     let mut entries = vec![];
 
@@ -115,7 +116,7 @@ pub fn extract_global_config(
         }
     }
 
-    GlobalConfig::build(&entries)
+    GlobalConfig::build(&entries, exp_mode)
 }
 
 /// Parses the input string into three parts: a global config, directives and transactions.

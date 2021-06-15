@@ -1,9 +1,14 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    block_storage::{block_tree::BlockTree, BlockReader},
+    block_storage::{
+        block_tree::BlockTree,
+        tracing::{observe_block, BlockStage},
+        BlockReader,
+    },
     counters,
+    logging::{LogEvent, LogSchema},
     persistent_liveness_storage::{
         PersistentLivenessStorage, RecoveryData, RootInfo, RootMetadata,
     },
@@ -15,18 +20,14 @@ use consensus_types::{
     block::Block, executed_block::ExecutedBlock, quorum_cert::QuorumCert, sync_info::SyncInfo,
     timeout_certificate::TimeoutCertificate,
 };
+use diem_crypto::HashValue;
+use diem_infallible::RwLock;
+use diem_logger::prelude::*;
+use diem_trace::prelude::*;
+use diem_types::{ledger_info::LedgerInfoWithSignatures, transaction::TransactionStatus};
 use executor_types::{Error, StateComputeResult};
-use libra_crypto::HashValue;
-use libra_logger::prelude::*;
-use libra_time::duration_since_epoch;
-use libra_trace::prelude::*;
-use libra_types::{ledger_info::LedgerInfoWithSignatures, transaction::TransactionStatus};
-use std::{
-    collections::vec_deque::VecDeque,
-    sync::{Arc, RwLock},
-    time::Duration,
-};
-use termion::color::*;
+use short_hex_str::AsShortHexStr;
+use std::{collections::vec_deque::VecDeque, sync::Arc, time::Duration};
 
 #[cfg(test)]
 #[path = "block_store_test.rs"]
@@ -41,11 +42,7 @@ pub mod sync_manager;
 
 fn update_counters_for_committed_blocks(blocks_to_commit: &[Arc<ExecutedBlock>]) {
     for block in blocks_to_commit {
-        if let Some(time_to_commit) =
-            duration_since_epoch().checked_sub(Duration::from_micros(block.timestamp_usecs()))
-        {
-            counters::CREATION_TO_COMMIT_S.observe_duration(time_to_commit);
-        }
+        observe_block(block.block().timestamp_usecs(), BlockStage::COMMITTED);
         let txn_status = block.compute_result().compute_status();
         counters::NUM_TXNS_PER_BLOCK.observe(txn_status.len() as f64);
         counters::COMMITTED_BLOCKS_COUNT.inc();
@@ -229,10 +226,17 @@ impl BlockStore {
             .await
             .expect("Failed to persist commit");
         update_counters_for_committed_blocks(&blocks_to_commit);
-        debug!("{}Committed{} {}", Fg(Blue), Fg(Reset), *block_to_commit);
+        let current_round = self.root().round();
+        let committed_round = block_to_commit.round();
+        debug!(
+            LogSchema::new(LogEvent::CommitViaBlock).round(current_round),
+            committed_round = committed_round,
+            block_id = block_to_commit.id(),
+        );
         event!("committed",
             "block_id": block_to_commit.id().short_str(),
-            "round": block_to_commit.round(),
+            "epoch": block_to_commit.epoch(),
+            "round": committed_round,
             "parent_id": block_to_commit.parent_id().short_str(),
         );
         self.prune_tree(block_to_commit.id());
@@ -246,7 +250,7 @@ impl BlockStore {
         blocks: Vec<Block>,
         quorum_certs: Vec<QuorumCert>,
     ) {
-        let max_pruned_blocks_in_mem = self.inner.read().unwrap().max_pruned_blocks_in_mem();
+        let max_pruned_blocks_in_mem = self.inner.read().max_pruned_blocks_in_mem();
         // Rollover the previous highest TC from the old tree to the new one.
         let prev_htc = self.highest_timeout_cert().map(|tc| tc.as_ref().clone());
         let BlockStore { inner, .. } = Self::build(
@@ -260,16 +264,15 @@ impl BlockStore {
             max_pruned_blocks_in_mem,
             Arc::clone(&self.time_service),
         );
-        let to_remove = self.inner.read().unwrap().get_all_block_id();
+        let to_remove = self.inner.read().get_all_block_id();
         if let Err(e) = self.storage.prune_tree(to_remove) {
             // it's fine to fail here, the next restart will try to clean up dangling blocks again.
-            error!("fail to delete block: {:?}", e);
+            error!(error = ?e, "Fail to delete block from consensus db");
         }
         // Unwrap the new tree and replace the existing tree.
-        *self.inner.write().unwrap() = Arc::try_unwrap(inner)
+        *self.inner.write() = Arc::try_unwrap(inner)
             .unwrap_or_else(|_| panic!("New block tree is not shared"))
-            .into_inner()
-            .unwrap();
+            .into_inner();
         // If we fail to commit B_i via state computer and crash, after restart our highest commit cert
         // will not match the latest commit B_j(j<i) of state computer.
         // This introduces an inconsistent state if we send out SyncInfo and others try to sync to
@@ -278,7 +281,7 @@ impl BlockStore {
         if self.highest_commit_cert().commit_info().round() > self.root().round() {
             let finality_proof = self.highest_commit_cert().ledger_info().clone();
             if let Err(e) = self.commit(finality_proof).await {
-                warn!("{:?}", e);
+                error!(error = ?e, "Commit error during rebuild");
             }
         }
     }
@@ -296,7 +299,7 @@ impl BlockStore {
             return Ok(existing_block);
         }
         ensure!(
-            self.inner.read().unwrap().root().round() < block.round(),
+            self.inner.read().root().round() < block.round(),
             "Block with old round"
         );
 
@@ -322,7 +325,7 @@ impl BlockStore {
         self.storage
             .save_tree(vec![executed_block.block().clone()], vec![])
             .context("Insert block failed when saving block")?;
-        self.inner.write().unwrap().insert_block(executed_block)
+        self.inner.write().insert_block(executed_block)
     }
 
     fn execute_block(&self, block: Block) -> anyhow::Result<ExecutedBlock, Error> {
@@ -331,6 +334,7 @@ impl BlockStore {
         // Although NIL blocks don't have a payload, we still send a T::default() to compute
         // because we may inject a block prologue transaction.
         let state_compute_result = self.state_computer.compute(&block, block.parent_id())?;
+        observe_block(block.timestamp_usecs(), BlockStage::EXECUTED);
 
         Ok(ExecutedBlock::new(block, state_compute_result))
     }
@@ -351,14 +355,18 @@ impl BlockStore {
                     qc.certified_block(),
                     executed_block.block_info()
                 );
+                observe_block(
+                    executed_block.block().timestamp_usecs(),
+                    BlockStage::QC_ADDED,
+                );
             }
             None => bail!("Insert {} without having the block in store first", qc),
-        }
+        };
 
         self.storage
             .save_tree(vec![], vec![qc.clone()])
             .context("Insert block failed when saving quorum")?;
-        self.inner.write().unwrap().insert_quorum_cert(qc)
+        self.inner.write().insert_quorum_cert(qc)
     }
 
     /// Replace the highest timeout certificate in case the given one has a higher round.
@@ -371,7 +379,7 @@ impl BlockStore {
         self.storage
             .save_highest_timeout_cert(tc.as_ref().clone())
             .context("Timeout certificate insert failed when persisting to DB")?;
-        self.inner.write().unwrap().replace_timeout_cert(tc);
+        self.inner.write().replace_timeout_cert(tc);
         Ok(())
     }
 
@@ -387,11 +395,7 @@ impl BlockStore {
     ///
     /// Returns the block ids of the blocks removed.
     fn prune_tree(&self, next_root_id: HashValue) -> VecDeque<HashValue> {
-        let id_to_remove = self
-            .inner
-            .read()
-            .unwrap()
-            .find_blocks_to_prune(next_root_id);
+        let id_to_remove = self.inner.read().find_blocks_to_prune(next_root_id);
         if let Err(e) = self
             .storage
             .prune_tree(id_to_remove.clone().into_iter().collect())
@@ -399,11 +403,10 @@ impl BlockStore {
             // it's fine to fail here, as long as the commit succeeds, the next restart will clean
             // up dangling blocks, and we need to prune the tree to keep the root consistent with
             // executor.
-            error!("fail to delete block: {:?}", e);
+            error!(error = ?e, "fail to delete block");
         }
         self.inner
             .write()
-            .unwrap()
             .process_pruned_blocks(next_root_id, id_to_remove.clone());
         id_to_remove
     }
@@ -411,42 +414,39 @@ impl BlockStore {
 
 impl BlockReader for BlockStore {
     fn block_exists(&self, block_id: HashValue) -> bool {
-        self.inner.read().unwrap().block_exists(&block_id)
+        self.inner.read().block_exists(&block_id)
     }
 
     fn get_block(&self, block_id: HashValue) -> Option<Arc<ExecutedBlock>> {
-        self.inner.read().unwrap().get_block(&block_id)
+        self.inner.read().get_block(&block_id)
     }
 
     fn root(&self) -> Arc<ExecutedBlock> {
-        self.inner.read().unwrap().root()
+        self.inner.read().root()
     }
 
     fn get_quorum_cert_for_block(&self, block_id: HashValue) -> Option<Arc<QuorumCert>> {
-        self.inner
-            .read()
-            .unwrap()
-            .get_quorum_cert_for_block(&block_id)
+        self.inner.read().get_quorum_cert_for_block(&block_id)
     }
 
     fn path_from_root(&self, block_id: HashValue) -> Option<Vec<Arc<ExecutedBlock>>> {
-        self.inner.read().unwrap().path_from_root(block_id)
+        self.inner.read().path_from_root(block_id)
     }
 
     fn highest_certified_block(&self) -> Arc<ExecutedBlock> {
-        self.inner.read().unwrap().highest_certified_block()
+        self.inner.read().highest_certified_block()
     }
 
     fn highest_quorum_cert(&self) -> Arc<QuorumCert> {
-        self.inner.read().unwrap().highest_quorum_cert()
+        self.inner.read().highest_quorum_cert()
     }
 
     fn highest_commit_cert(&self) -> Arc<QuorumCert> {
-        self.inner.read().unwrap().highest_commit_cert()
+        self.inner.read().highest_commit_cert()
     }
 
     fn highest_timeout_cert(&self) -> Option<Arc<TimeoutCertificate>> {
-        self.inner.read().unwrap().highest_timeout_cert()
+        self.inner.read().highest_timeout_cert()
     }
 
     fn sync_info(&self) -> SyncInfo {
@@ -462,17 +462,17 @@ impl BlockReader for BlockStore {
 impl BlockStore {
     /// Returns the number of blocks in the tree
     pub(crate) fn len(&self) -> usize {
-        self.inner.read().unwrap().len()
+        self.inner.read().len()
     }
 
     /// Returns the number of child links in the tree
     pub(crate) fn child_links(&self) -> usize {
-        self.inner.read().unwrap().child_links()
+        self.inner.read().child_links()
     }
 
     /// The number of pruned blocks that are still available in memory
     pub(super) fn pruned_blocks_in_mem(&self) -> usize {
-        self.inner.read().unwrap().pruned_blocks_in_mem()
+        self.inner.read().pruned_blocks_in_mem()
     }
 
     /// Helper function to insert the block with the qc together

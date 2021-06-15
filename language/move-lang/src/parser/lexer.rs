@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{errors::*, parser::syntax::make_loc, FileCommentMap, MatchedFileCommentMap};
@@ -78,6 +78,7 @@ pub enum Tok {
     Fun,
     Script,
     Const,
+    Friend,
 }
 
 impl fmt::Display for Tok {
@@ -154,6 +155,7 @@ impl fmt::Display for Tok {
             Fun => "fun",
             Script => "script",
             Const => "const",
+            Friend => "friend",
         };
         fmt::Display::fmt(s, formatter)
     }
@@ -428,20 +430,14 @@ fn find_token(file: &'static str, text: &str, start_offset: usize) -> Result<(To
 // checks on the first character.
 fn get_name_len(text: &str) -> usize {
     text.chars()
-        .position(|c| match c {
-            'a'..='z' | 'A'..='Z' | '_' | '0'..='9' => false,
-            _ => true,
-        })
+        .position(|c| !matches!(c, 'a'..='z' | 'A'..='Z' | '_' | '0'..='9'))
         .unwrap_or_else(|| text.len())
 }
 
 fn get_decimal_number(text: &str) -> (Tok, usize) {
     let len = text
         .chars()
-        .position(|c| match c {
-            '0'..='9' => false,
-            _ => true,
-        })
+        .position(|c| !matches!(c, '0'..='9'))
         .unwrap_or_else(|| text.len());
     let rest = &text[len..];
     if rest.starts_with("u8") {
@@ -457,11 +453,8 @@ fn get_decimal_number(text: &str) -> (Tok, usize) {
 
 // Return the length of the substring containing characters in [0-9a-fA-F].
 fn get_hex_digits_len(text: &str) -> usize {
-    text.find(|c| match c {
-        'a'..='f' | 'A'..='F' | '0'..='9' => false,
-        _ => true,
-    })
-    .unwrap_or_else(|| text.len())
+    text.find(|c| !matches!(c, 'a'..='f' | 'A'..='F' | '0'..='9'))
+        .unwrap_or_else(|| text.len())
 }
 
 // Return the length of the quoted string, or None if there is no closing quote.
@@ -496,6 +489,7 @@ fn get_name_token(name: &str) -> Tok {
         "else" => Tok::Else,
         "false" => Tok::False,
         "fun" => Tok::Fun,
+        "friend" => Tok::Friend,
         "if" => Tok::If,
         "invariant" => Tok::Invariant,
         "let" => Tok::Let,

@@ -1,8 +1,8 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::{format_err, Result};
-use libra_types::account_address::AccountAddress;
+use diem_types::account_address::AccountAddress;
 use move_core_types::identifier::Identifier;
 use move_ir_types::ast::{ConstantName, ModuleName, NopLabel, QualifiedModuleIdent};
 use serde::{Deserialize, Serialize};
@@ -236,9 +236,9 @@ impl<Location: Clone + Eq> FunctionSourceMap<Location> {
     }
 
     pub fn make_local_name_to_index_map(&self) -> BTreeMap<&String, LocalIndex> {
-        self.locals
+        self.parameters
             .iter()
-            .chain(self.parameters.iter())
+            .chain(&self.locals)
             .enumerate()
             .map(|(i, (n, _))| (n, i as LocalIndex))
             .collect()

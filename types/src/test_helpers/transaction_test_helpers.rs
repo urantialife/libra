@@ -1,19 +1,28 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
     account_address::AccountAddress,
-    account_config::LBR_NAME,
+    account_config::XUS_NAME,
     chain_id::ChainId,
     transaction::{Module, RawTransaction, Script, SignatureCheckedTransaction, SignedTransaction},
     write_set::WriteSet,
 };
-use libra_crypto::{ed25519::*, traits::*};
+use diem_crypto::{ed25519::*, traits::*};
 
 const MAX_GAS_AMOUNT: u64 = 1_000_000;
 const TEST_GAS_PRICE: u64 = 0;
 
 static EMPTY_SCRIPT: &[u8] = include_bytes!("empty_script.mv");
+
+// Create an expiration time 'seconds' after now
+fn expiration_time(seconds: u64) -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .expect("System time is before the UNIX_EPOCH")
+        .as_secs()
+        + seconds
+}
 
 // Test helper for transaction creation
 pub fn get_test_signed_module_publishing_transaction(
@@ -23,14 +32,14 @@ pub fn get_test_signed_module_publishing_transaction(
     public_key: Ed25519PublicKey,
     module: Module,
 ) -> SignedTransaction {
-    let expiration_time = libra_time::duration_since_epoch().as_secs() + 10;
+    let expiration_time = expiration_time(10);
     let raw_txn = RawTransaction::new_module(
         sender,
         sequence_number,
         module,
         MAX_GAS_AMOUNT,
         TEST_GAS_PRICE,
-        LBR_NAME.to_owned(),
+        XUS_NAME.to_owned(),
         expiration_time,
         ChainId::test(),
     );
@@ -132,7 +141,7 @@ pub fn get_test_signed_txn(
     public_key: Ed25519PublicKey,
     script: Option<Script>,
 ) -> SignedTransaction {
-    let expiration_time = libra_time::duration_since_epoch().as_secs() + 10; // 10 seconds from now.
+    let expiration_time = expiration_time(10);
     get_test_signed_transaction(
         sender,
         sequence_number,
@@ -141,7 +150,7 @@ pub fn get_test_signed_txn(
         script,
         expiration_time,
         TEST_GAS_PRICE,
-        LBR_NAME.to_owned(),
+        XUS_NAME.to_owned(),
         None,
     )
 }
@@ -153,7 +162,7 @@ pub fn get_test_unchecked_txn(
     public_key: Ed25519PublicKey,
     script: Option<Script>,
 ) -> SignedTransaction {
-    let expiration_time = libra_time::duration_since_epoch().as_secs() + 10; // 10 seconds from now.
+    let expiration_time = expiration_time(10);
     get_test_unchecked_transaction(
         sender,
         sequence_number,
@@ -162,7 +171,7 @@ pub fn get_test_unchecked_txn(
         script,
         expiration_time,
         TEST_GAS_PRICE,
-        LBR_NAME.to_owned(),
+        XUS_NAME.to_owned(),
         None,
     )
 }
@@ -174,7 +183,7 @@ pub fn get_test_txn_with_chain_id(
     public_key: Ed25519PublicKey,
     chain_id: ChainId,
 ) -> SignedTransaction {
-    let expiration_time = libra_time::duration_since_epoch().as_secs() + 10; // 10 seconds from now.
+    let expiration_time = expiration_time(10);
     get_test_unchecked_transaction_(
         sender,
         sequence_number,
@@ -183,7 +192,7 @@ pub fn get_test_txn_with_chain_id(
         None,
         expiration_time,
         TEST_GAS_PRICE,
-        LBR_NAME.to_owned(),
+        XUS_NAME.to_owned(),
         None,
         chain_id,
     )

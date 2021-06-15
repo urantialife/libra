@@ -1,17 +1,13 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+use diem_config::config::RocksdbConfig;
+use diem_management::{config::ConfigPath, error::Error, secure_backend::SharedBackend};
+use diem_temppath::TempPath;
+use diem_types::{chain_id::ChainId, waypoint::Waypoint};
+use diem_vm::DiemVM;
+use diemdb::DiemDB;
 use executor::db_bootstrapper;
-use libra_global_constants::WAYPOINT;
-use libra_management::{
-    config::ConfigPath,
-    error::Error,
-    secure_backend::{SharedBackend, ValidatorBackend},
-};
-use libra_temppath::TempPath;
-use libra_types::{chain_id::ChainId, waypoint::Waypoint};
-use libra_vm::LibraVM;
-use libradb::LibraDB;
 use storage_interface::DbReaderWriter;
 use structopt::StructOpt;
 
@@ -39,42 +35,11 @@ impl CreateWaypoint {
         let genesis = genesis_helper.execute()?;
 
         let path = TempPath::new();
-        let libradb =
-            LibraDB::open(&path, false, None).map_err(|e| Error::UnexpectedError(e.to_string()))?;
-        let db_rw = DbReaderWriter::new(libradb);
+        let diemdb = DiemDB::open(&path, false, None, RocksdbConfig::default())
+            .map_err(|e| Error::UnexpectedError(e.to_string()))?;
+        let db_rw = DbReaderWriter::new(diemdb);
 
-        db_bootstrapper::generate_waypoint::<LibraVM>(&db_rw, &genesis)
+        db_bootstrapper::generate_waypoint::<DiemVM>(&db_rw, &genesis)
             .map_err(|e| Error::UnexpectedError(e.to_string()))
-    }
-}
-
-#[derive(Debug, StructOpt)]
-pub struct CreateAndInsertWaypoint {
-    #[structopt(long, required_unless("config"))]
-    chain_id: Option<ChainId>,
-    #[structopt(flatten)]
-    config: ConfigPath,
-    #[structopt(flatten)]
-    shared_backend: SharedBackend,
-    #[structopt(flatten)]
-    validator_backend: ValidatorBackend,
-}
-
-impl CreateAndInsertWaypoint {
-    pub fn execute(self) -> Result<Waypoint, Error> {
-        let waypoint = CreateWaypoint {
-            chain_id: self.chain_id,
-            config: self.config.clone(),
-            shared_backend: self.shared_backend,
-        }
-        .execute()?;
-
-        let config = self
-            .config
-            .load()?
-            .override_validator_backend(&self.validator_backend.validator_backend)?;
-        let mut validator_storage = config.validator_backend();
-        validator_storage.set(WAYPOINT, waypoint)?;
-        Ok(waypoint)
     }
 }

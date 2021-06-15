@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use move_core_types::gas_schedule::GasAlgebra;
@@ -8,6 +8,7 @@ use move_vm_types::{
     natives::function::{native_gas, NativeContext, NativeResult},
     values::Value,
 };
+use smallvec::smallvec;
 use std::collections::VecDeque;
 use vm::errors::PartialVMResult;
 
@@ -34,5 +35,5 @@ pub fn native_emit_event(
         return Ok(NativeResult::err(cost, 0));
     }
 
-    Ok(NativeResult::ok(cost, vec![]))
+    Ok(NativeResult::ok(cost, smallvec![]))
 }

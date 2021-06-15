@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 //! Protocols used by network module for external APIs and internal functionality
@@ -8,7 +8,6 @@ pub mod direct_send;
 pub mod network;
 pub mod rpc;
 
-pub mod gossip_discovery;
 pub mod health_checker;
 pub mod identity;
 pub mod wire;

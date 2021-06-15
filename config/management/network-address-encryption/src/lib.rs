@@ -1,18 +1,22 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
 
-use libra_global_constants::VALIDATOR_NETWORK_ADDRESS_KEYS;
-use libra_network_address::{
-    encrypted::{
-        EncNetworkAddress, Key, KeyVersion, TEST_SHARED_VAL_NETADDR_KEY,
-        TEST_SHARED_VAL_NETADDR_KEY_VERSION,
+use diem_global_constants::VALIDATOR_NETWORK_ADDRESS_KEYS;
+use diem_infallible::RwLock;
+use diem_secure_storage::{Error as StorageError, KVStorage, Storage};
+use diem_types::{
+    account_address::AccountAddress,
+    network_address::{
+        self,
+        encrypted::{
+            EncNetworkAddress, Key, KeyVersion, TEST_SHARED_VAL_NETADDR_KEY,
+            TEST_SHARED_VAL_NETADDR_KEY_VERSION,
+        },
+        NetworkAddress,
     },
-    NetworkAddress,
 };
-use libra_secure_storage::{Error as StorageError, KVStorage, Storage};
-use move_core_types::account_address::AccountAddress;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;
@@ -24,9 +28,9 @@ pub enum Error {
     #[error("Unable to decrypt address for account {0}: {1}")]
     DecryptionError(AccountAddress, String),
     #[error("Failed (de)serializing validator_network_address_keys")]
-    LCSError(#[from] lcs::Error),
+    BCSError(#[from] bcs::Error),
     #[error("NetworkAddress parse error {0}")]
-    ParseError(#[from] libra_network_address::ParseError),
+    ParseError(#[from] network_address::ParseError),
     #[error("Failed reading validator_network_address_keys from storage")]
     StorageError(#[from] StorageError),
     #[error("The specified version does not exist in validator_network_address_keys: {0}")]
@@ -35,17 +39,21 @@ pub enum Error {
 
 pub struct Encryptor {
     storage: Storage,
+    cached_keys: RwLock<Option<ValidatorKeys>>,
 }
 
 impl Encryptor {
     pub fn new(storage: Storage) -> Self {
-        Self { storage }
+        Self {
+            storage,
+            cached_keys: RwLock::new(None),
+        }
     }
 
     /// This generates an Encryptor for use in default / testing scenarios where (proper)
     /// encryption is not necessary.
     pub fn for_testing() -> Self {
-        let storage = Storage::InMemoryStorage(libra_secure_storage::InMemoryStorage::new());
+        let storage = Storage::InMemoryStorage(diem_secure_storage::InMemoryStorage::new());
         let mut encryptor = Encryptor::new(storage);
         encryptor.initialize_for_testing().unwrap();
         encryptor
@@ -81,12 +89,12 @@ impl Encryptor {
         let key = keys
             .keys
             .get(&keys.current)
-            .ok_or_else(|| Error::VersionNotFound(keys.current))?;
+            .ok_or(Error::VersionNotFound(keys.current))?;
         let mut enc_addrs = Vec::new();
         for (idx, addr) in network_addresses.iter().cloned().enumerate() {
             enc_addrs.push(addr.encrypt(&key.0, keys.current, &account, seq_num, idx as u32)?);
         }
-        lcs::to_bytes(&enc_addrs).map_err(|e| e.into())
+        bcs::to_bytes(&enc_addrs).map_err(|e| e.into())
     }
 
     pub fn decrypt(
@@ -95,7 +103,7 @@ impl Encryptor {
         account: AccountAddress,
     ) -> Result<Vec<NetworkAddress>, Error> {
         let keys = self.read()?;
-        let enc_addrs: Vec<EncNetworkAddress> = lcs::from_bytes(&encrypted_network_addresses)
+        let enc_addrs: Vec<EncNetworkAddress> = bcs::from_bytes(&encrypted_network_addresses)
             .map_err(|e| Error::AddressDeserialization(account, e.to_string()))?;
         let mut addrs = Vec::new();
         for (idx, enc_addr) in enc_addrs.iter().enumerate() {
@@ -126,10 +134,25 @@ impl Encryptor {
     }
 
     fn read(&self) -> Result<ValidatorKeys, Error> {
-        self.storage
+        let result = self
+            .storage
             .get::<ValidatorKeys>(VALIDATOR_NETWORK_ADDRESS_KEYS)
             .map(|v| v.value)
-            .map_err(|e| e.into())
+            .map_err(|e| e.into());
+
+        match &result {
+            Ok(keys) => {
+                *self.cached_keys.write() = Some(keys.clone());
+            }
+            Err(err) => diem_logger::error!(
+                "Unable to read {} from storage: {}",
+                VALIDATOR_NETWORK_ADDRESS_KEYS,
+                err
+            ),
+        }
+
+        let keys = self.cached_keys.read();
+        keys.as_ref().map_or(result, |v| Ok(v.clone()))
     }
 
     fn write(&mut self, keys: &ValidatorKeys) -> Result<(), Error> {
@@ -139,10 +162,10 @@ impl Encryptor {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct StorageKey(
     #[serde(
-        serialize_with = "libra_secure_storage::to_base64",
+        serialize_with = "diem_secure_storage::to_base64",
         deserialize_with = "from_base64"
     )]
     Key,
@@ -167,7 +190,7 @@ where
         })
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ValidatorKeys {
     keys: HashMap<KeyVersion, StorageKey>,
     current: KeyVersion,
@@ -185,7 +208,7 @@ impl Default for ValidatorKeys {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use libra_secure_storage::InMemoryStorage;
+    use diem_secure_storage::InMemoryStorage;
     use rand::{rngs::OsRng, Rng, RngCore, SeedableRng};
 
     #[test]
@@ -195,7 +218,7 @@ mod tests {
         encryptor.initialize().unwrap();
 
         let mut rng = rand::rngs::StdRng::from_seed(OsRng.gen());
-        let mut key = [0; libra_network_address::encrypted::KEY_LEN];
+        let mut key = [0; network_address::encrypted::KEY_LEN];
         rng.fill_bytes(&mut key);
         encryptor.add_key(0, key).unwrap();
         encryptor.set_current_version(0).unwrap();
@@ -220,21 +243,48 @@ mod tests {
         encryptor.decrypt(&enc_addrs, another_account).unwrap_err();
     }
 
+    #[test]
+    fn cache_test() {
+        // Prepare some initial data and verify e2e
+        let mut encryptor = Encryptor::for_testing();
+        let addr = std::str::FromStr::from_str("/ip4/10.0.0.16/tcp/80").unwrap();
+        let addrs = vec![addr];
+        let account = AccountAddress::random();
+
+        let enc_addrs = encryptor.encrypt(&addrs, account, 0).unwrap();
+        let dec_addrs = encryptor.decrypt(&enc_addrs, account).unwrap();
+        assert_eq!(addrs, dec_addrs);
+
+        // Reset storage and we should use cache
+        encryptor.storage = Storage::from(InMemoryStorage::new());
+        let enc_addrs = encryptor.encrypt(&addrs, account, 1).unwrap();
+        let dec_addrs = encryptor.decrypt(&enc_addrs, account).unwrap();
+        assert_eq!(addrs, dec_addrs);
+
+        // Reset cache and we should get an err
+        *encryptor.cached_keys.write() = None;
+        encryptor.encrypt(&addrs, account, 1).unwrap_err();
+        encryptor.decrypt(&enc_addrs, account).unwrap_err();
+    }
+
     // The only purpose of this test is to generate a baseline for vault
     #[ignore]
     #[test]
     fn initializer() {
-        let storage = Storage::VaultStorage(libra_secure_storage::VaultStorage::new(
+        let storage = Storage::VaultStorage(diem_secure_storage::VaultStorage::new(
             "http://127.0.0.1:8200".to_string(),
             "root_token".to_string(),
             Some("network_address_encryption_keys".to_string()),
+            None,
+            None,
+            true,
             None,
             None,
         ));
         let mut encryptor = Encryptor::new(storage);
         encryptor.initialize().unwrap();
         let mut rng = rand::rngs::StdRng::from_seed(OsRng.gen());
-        let mut key = [0; libra_network_address::encrypted::KEY_LEN];
+        let mut key = [0; network_address::encrypted::KEY_LEN];
         rng.fill_bytes(&mut key);
         encryptor.add_key(0, key).unwrap();
         encryptor.set_current_version(0).unwrap();

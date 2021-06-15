@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
@@ -9,14 +9,14 @@ use crate::{
     instance::Instance,
 };
 use debug_interface::AsyncNodeDebugClient;
-use libra_logger::{json_log::JsonLogEntry as DebugInterfaceEvent, *};
-use libra_time::duration_since_epoch;
+use diem_infallible::{duration_since_epoch, Mutex};
+use diem_logger::{json_log::JsonLogEntry as DebugInterfaceEvent, *};
 use serde_json::{self, value as json};
 use std::{
     env,
     sync::{
         atomic::{AtomicBool, AtomicI64, Ordering},
-        mpsc, Arc, Mutex,
+        mpsc, Arc,
     },
     time::Duration,
 };
@@ -82,7 +82,7 @@ impl DebugPortLogWorker {
                     if print_failures {
                         info!("Failed to get events from {}: {:?}", self.instance, e);
                     }
-                    time::delay_for(Duration::from_secs(1)).await;
+                    time::sleep(Duration::from_secs(1)).await;
                 }
                 Ok(resp) => {
                     let mut sent_events = 0i64;
@@ -94,7 +94,7 @@ impl DebugPortLogWorker {
                     }
                     self.pending_messages
                         .fetch_add(sent_events, Ordering::Relaxed);
-                    time::delay_for(Duration::from_millis(100)).await;
+                    time::sleep(Duration::from_millis(100)).await;
                 }
             }
             if let Some(started_sender) = self.started_sender.take() {
@@ -131,6 +131,11 @@ impl DebugPortLogWorker {
                 .as_str()
                 .expect("block_id is not string")
                 .to_string(),
+            epoch: json
+                .get("epoch")
+                .expect("No epoch in commit event")
+                .as_u64()
+                .expect("epoch is not u64"),
             round: json
                 .get("round")
                 .expect("No round in commit event")

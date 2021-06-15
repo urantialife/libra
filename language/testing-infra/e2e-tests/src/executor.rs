@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 //! Support for running the VM to execute and verify transactions.
@@ -6,16 +6,18 @@
 use crate::{
     account::{Account, AccountData},
     data_store::{FakeDataStore, GENESIS_CHANGE_SET, GENESIS_CHANGE_SET_FRESH},
+    golden_outputs::GoldenOutputs,
+    keygen::KeyGen,
 };
-use compiled_stdlib::{stdlib_modules, transaction_scripts::StdlibScript, StdLibOptions};
-use libra_config::generator;
-use libra_crypto::HashValue;
-use libra_state_view::StateView;
-use libra_types::{
+use compiled_stdlib::{
+    legacy::transaction_scripts::LegacyStdlibScript, stdlib_modules, StdLibModules, StdLibOptions,
+};
+use diem_crypto::HashValue;
+use diem_state_view::StateView;
+use diem_types::{
     access_path::AccessPath,
     account_config::{AccountResource, BalanceResource, CORE_CODE_ADDRESS},
     block_metadata::{new_block_event_key, BlockMetadata, NewBlockEvent},
-    chain_id::ChainId,
     on_chain_config::{OnChainConfig, VMPublishingOption, ValidatorSet},
     transaction::{
         SignedTransaction, Transaction, TransactionOutput, TransactionStatus, VMValidatorResult,
@@ -23,31 +25,29 @@ use libra_types::{
     vm_status::{KeptVMStatus, VMStatus},
     write_set::WriteSet,
 };
-use libra_vm::{
-    data_cache::RemoteStorage, txn_effects_to_writeset_and_events, LibraVM, LibraVMValidator,
-    VMExecutor, VMValidator,
+use diem_vm::{
+    convert_changeset_and_events, data_cache::RemoteStorage, DiemVM, DiemVMValidator, VMExecutor,
+    VMValidator,
 };
 use move_core_types::{
-    account_address::AccountAddress,
     gas_schedule::{GasAlgebra, GasUnits},
     identifier::Identifier,
     language_storage::{ModuleId, TypeTag},
 };
-use move_vm_runtime::move_vm::MoveVM;
-use move_vm_types::{
-    gas_schedule::{zero_cost_schedule, CostStrategy},
-    values::Value,
-};
-use vm::CompiledModule;
-use vm_genesis::GENESIS_KEYPAIR;
+use move_vm_runtime::{logging::NoContextLog, move_vm::MoveVM};
+use move_vm_types::gas_schedule::{zero_cost_schedule, CostStrategy};
+
+static RNG_SEED: [u8; 32] = [9u8; 32];
 
 /// Provides an environment to run a VM instance.
 ///
-/// This struct is a mock in-memory implementation of the Libra executor.
+/// This struct is a mock in-memory implementation of the Diem executor.
 #[derive(Debug)]
 pub struct FakeExecutor {
     data_store: FakeDataStore,
     block_time: u64,
+    executed_output: Option<GoldenOutputs>,
+    rng: KeyGen,
 }
 
 impl FakeExecutor {
@@ -56,6 +56,8 @@ impl FakeExecutor {
         let mut executor = FakeExecutor {
             data_store: FakeDataStore::default(),
             block_time: 0,
+            executed_output: None,
+            rng: KeyGen::from_seed(RNG_SEED),
         };
         executor.apply_write_set(write_set);
         executor
@@ -73,9 +75,9 @@ impl FakeExecutor {
 
     pub fn allowlist_genesis() -> Self {
         Self::custom_genesis(
-            stdlib_modules(StdLibOptions::Compiled).to_vec(),
+            stdlib_modules(StdLibOptions::Compiled).bytes_opt.unwrap(),
             None,
-            VMPublishingOption::locked(StdlibScript::allowlist()),
+            VMPublishingOption::locked(LegacyStdlibScript::allowlist()),
         )
     }
 
@@ -88,7 +90,7 @@ impl FakeExecutor {
         }
 
         Self::custom_genesis(
-            stdlib_modules(StdLibOptions::Compiled).to_vec(),
+            stdlib_modules(StdLibOptions::Compiled).bytes_opt.unwrap(),
             None,
             publishing_options,
         )
@@ -99,42 +101,57 @@ impl FakeExecutor {
         FakeExecutor {
             data_store: FakeDataStore::default(),
             block_time: 0,
+            executed_output: None,
+            rng: KeyGen::from_seed(RNG_SEED),
         }
+    }
+
+    pub fn set_golden_file(&mut self, test_name: &str) {
+        // 'test_name' includes ':' in the names, lets re-write these to be '_'s so that these
+        // files can persist on windows machines.
+        let file_name = test_name.replace(':', "_");
+        self.executed_output = Some(GoldenOutputs::new(&file_name));
     }
 
     /// Creates an executor with only the standard library Move modules published and not other
     /// initialization done.
     pub fn stdlib_only_genesis() -> Self {
         let mut genesis = Self::no_genesis();
-        for module in stdlib_modules(StdLibOptions::Compiled) {
+        let StdLibModules {
+            bytes_opt,
+            compiled_modules,
+        } = stdlib_modules(StdLibOptions::Compiled);
+        let bytes = bytes_opt.unwrap();
+        assert!(bytes.len() == compiled_modules.len());
+        for (module, bytes) in compiled_modules.iter().zip(bytes) {
             let id = module.self_id();
-            genesis.add_module(&id, module);
+            genesis.add_module(&id, bytes.to_vec());
         }
         genesis
     }
 
     /// Creates fresh genesis from the stdlib modules passed in.
     pub fn custom_genesis(
-        genesis_modules: Vec<CompiledModule>,
+        genesis_modules: &[Vec<u8>],
         validator_accounts: Option<usize>,
         publishing_options: VMPublishingOption,
     ) -> Self {
-        let genesis_change_set = {
-            let validator_count = validator_accounts.map_or(10, |s| s);
-            let swarm = generator::validator_swarm_for_testing(validator_count);
+        let genesis = vm_genesis::generate_test_genesis(
+            &genesis_modules,
+            publishing_options,
+            validator_accounts,
+        );
+        Self::from_genesis(genesis.0.write_set())
+    }
 
-            vm_genesis::encode_genesis_change_set(
-                &GENESIS_KEYPAIR.1,
-                &GENESIS_KEYPAIR.1,
-                &vm_genesis::operator_assignments(&swarm.nodes),
-                &vm_genesis::operator_registrations(&swarm.nodes),
-                &genesis_modules,
-                publishing_options,
-                ChainId::test(),
-            )
-            .0
-        };
-        Self::from_genesis(genesis_change_set.write_set())
+    /// Create one instance of [`AccountData`] without saving it to data store.
+    pub fn create_raw_account(&mut self) -> Account {
+        Account::new_from_seed(&mut self.rng)
+    }
+
+    /// Create one instance of [`AccountData`] without saving it to data store.
+    pub fn create_raw_account_data(&mut self, balance: u64, seq_num: u64) -> AccountData {
+        AccountData::new_from_seed(&mut self.rng, balance, seq_num)
     }
 
     /// Creates a number of [`Account`] instances all with the same balance and sequence number,
@@ -142,7 +159,7 @@ impl FakeExecutor {
     pub fn create_accounts(&mut self, size: usize, balance: u64, seq_num: u64) -> Vec<Account> {
         let mut accounts: Vec<Account> = Vec::with_capacity(size);
         for _i in 0..size {
-            let account_data = AccountData::new(balance, seq_num);
+            let account_data = AccountData::new_from_seed(&mut self.rng, balance, seq_num);
             self.add_account_data(&account_data);
             accounts.push(account_data.into_account());
         }
@@ -162,8 +179,8 @@ impl FakeExecutor {
     /// Adds a module to this executor's data store.
     ///
     /// Does not do any sort of verification on the module.
-    pub fn add_module(&mut self, module_id: &ModuleId, module: &CompiledModule) {
-        self.data_store.add_module(module_id, module)
+    pub fn add_module(&mut self, module_id: &ModuleId, module_blob: Vec<u8>) {
+        self.data_store.add_module(module_id, module_blob)
     }
 
     /// Reads the resource [`Value`] for an account from this executor's data store.
@@ -172,7 +189,7 @@ impl FakeExecutor {
         let data_blob = StateView::get(&self.data_store, &ap)
             .expect("account must exist in data store")
             .unwrap_or_else(|| panic!("Can't fetch account resource for {}", account.address()));
-        lcs::from_bytes(data_blob.as_slice()).ok()
+        bcs::from_bytes(data_blob.as_slice()).ok()
     }
 
     /// Reads the balance resource value for an account from this executor's data store with the
@@ -186,7 +203,7 @@ impl FakeExecutor {
         StateView::get(&self.data_store, &ap)
             .unwrap_or_else(|_| panic!("account {:?} must exist in data store", account.address()))
             .map(|data_blob| {
-                lcs::from_bytes(data_blob.as_slice()).expect("Failure decoding balance resource")
+                bcs::from_bytes(data_blob.as_slice()).expect("Failure decoding balance resource")
             })
     }
 
@@ -198,12 +215,11 @@ impl FakeExecutor {
         &self,
         txn_block: Vec<SignedTransaction>,
     ) -> Result<Vec<TransactionOutput>, VMStatus> {
-        LibraVM::execute_block(
+        self.execute_transaction_block(
             txn_block
                 .into_iter()
                 .map(Transaction::UserTransaction)
                 .collect(),
-            &self.data_store,
         )
     }
 
@@ -213,7 +229,7 @@ impl FakeExecutor {
         &self,
         txn_block: Vec<SignedTransaction>,
     ) -> Result<Vec<(VMStatus, TransactionOutput)>, VMStatus> {
-        LibraVM::execute_block_and_keep_vm_status(
+        DiemVM::execute_block_and_keep_vm_status(
             txn_block
                 .into_iter()
                 .map(Transaction::UserTransaction)
@@ -247,7 +263,11 @@ impl FakeExecutor {
         &self,
         txn_block: Vec<Transaction>,
     ) -> Result<Vec<TransactionOutput>, VMStatus> {
-        LibraVM::execute_block(txn_block, &self.data_store)
+        let output = DiemVM::execute_block(txn_block, &self.data_store);
+        if let Some(logger) = &self.executed_output {
+            logger.log(format!("{:?}\n", output).as_str());
+        }
+        output
     }
 
     pub fn execute_transaction(&self, txn: SignedTransaction) -> TransactionOutput {
@@ -267,7 +287,7 @@ impl FakeExecutor {
 
     /// Verifies the given transaction by running it through the VM verifier.
     pub fn verify_transaction(&self, txn: SignedTransaction) -> VMValidatorResult {
-        let vm = LibraVMValidator::new(self.get_state_view());
+        let vm = DiemVMValidator::new(self.get_state_view());
         vm.validate_transaction(txn, &self.data_store)
     }
 
@@ -276,9 +296,13 @@ impl FakeExecutor {
     }
 
     pub fn new_block(&mut self) {
+        self.new_block_with_timestamp(self.block_time + 1);
+    }
+
+    pub fn new_block_with_timestamp(&mut self, time_stamp: u64) {
         let validator_set = ValidatorSet::fetch_config(&self.data_store)
             .expect("Unable to retrieve the validator set from storage");
-        self.block_time += 1;
+        self.block_time = time_stamp;
         let new_block = BlockMetadata::new(
             HashValue::zero(),
             0,
@@ -294,7 +318,7 @@ impl FakeExecutor {
         // check if we emit the expected event, there might be more events for transaction fees
         let event = output.events()[0].clone();
         assert_eq!(event.key(), &new_block_event_key());
-        assert!(lcs::from_bytes::<NewBlockEvent>(event.event_data()).is_ok());
+        assert!(bcs::from_bytes::<NewBlockEvent>(event.event_data()).is_ok());
         self.apply_write_set(output.write_set());
     }
 
@@ -319,8 +343,7 @@ impl FakeExecutor {
         module_name: &str,
         function_name: &str,
         type_params: Vec<TypeTag>,
-        args: Vec<Value>,
-        sender: &AccountAddress,
+        args: Vec<Vec<u8>>,
     ) {
         let write_set = {
             let cost_table = zero_cost_schedule();
@@ -328,22 +351,27 @@ impl FakeExecutor {
             let vm = MoveVM::new();
             let remote_view = RemoteStorage::new(&self.data_store);
             let mut session = vm.new_session(&remote_view);
+            let log_context = NoContextLog::new();
             session
                 .execute_function(
                     &Self::module(module_name),
                     &Self::name(function_name),
                     type_params,
                     args,
-                    *sender,
                     &mut cost_strategy,
-                    |e| e,
+                    &log_context,
                 )
                 .unwrap_or_else(|e| {
-                    panic!("Error calling {}.{}: {}", module_name, function_name, e)
+                    panic!(
+                        "Error calling {}.{}: {}",
+                        module_name,
+                        function_name,
+                        e.into_vm_status()
+                    )
                 });
-            let effects = session.finish().expect("Failed to generate txn effects");
-            let (writeset, _events) =
-                txn_effects_to_writeset_and_events(effects).expect("Failed to generate writeset");
+            let (changeset, events) = session.finish().expect("Failed to generate txn effects");
+            let (writeset, _events) = convert_changeset_and_events(changeset, events)
+                .expect("Failed to generate writeset");
             writeset
         };
         self.data_store.add_write_set(&write_set);
@@ -354,26 +382,27 @@ impl FakeExecutor {
         module_name: &str,
         function_name: &str,
         type_params: Vec<TypeTag>,
-        args: Vec<Value>,
-        sender: &AccountAddress,
+        args: Vec<Vec<u8>>,
     ) -> Result<WriteSet, VMStatus> {
         let cost_table = zero_cost_schedule();
         let mut cost_strategy = CostStrategy::system(&cost_table, GasUnits::new(100_000_000));
         let vm = MoveVM::new();
         let remote_view = RemoteStorage::new(&self.data_store);
         let mut session = vm.new_session(&remote_view);
-        session.execute_function(
-            &Self::module(module_name),
-            &Self::name(function_name),
-            type_params,
-            args,
-            *sender,
-            &mut cost_strategy,
-            |e| e,
-        )?;
-        let effects = session.finish().expect("Failed to generate txn effects");
+        let log_context = NoContextLog::new();
+        session
+            .execute_function(
+                &Self::module(module_name),
+                &Self::name(function_name),
+                type_params,
+                args,
+                &mut cost_strategy,
+                &log_context,
+            )
+            .map_err(|e| e.into_vm_status())?;
+        let (changeset, events) = session.finish().expect("Failed to generate txn effects");
         let (writeset, _events) =
-            txn_effects_to_writeset_and_events(effects).expect("Failed to generate writeset");
+            convert_changeset_and_events(changeset, events).expect("Failed to generate writeset");
         Ok(writeset)
     }
 }

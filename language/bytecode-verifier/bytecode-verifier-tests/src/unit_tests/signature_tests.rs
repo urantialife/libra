@@ -1,9 +1,9 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use bytecode_verifier::{verify_module, SignatureChecker};
+use diem_types::account_address::AccountAddress;
 use invalid_mutations::signature::{FieldRefMutation, SignatureRefMutation};
-use libra_types::account_address::AccountAddress;
 use move_core_types::identifier::Identifier;
 use proptest::{collection::vec, prelude::*, sample::Index as PropIndex};
 use vm::file_format::{Bytecode::*, CompiledModule, SignatureToken::*, *};
@@ -86,6 +86,7 @@ fn no_verify_locals_good() {
             },
         ],
         field_handles: vec![],
+        friend_decls: vec![],
         struct_def_instantiations: vec![],
         function_instantiations: vec![],
         field_instantiations: vec![],
@@ -100,7 +101,7 @@ fn no_verify_locals_good() {
         function_defs: vec![
             FunctionDefinition {
                 function: FunctionHandleIndex(0),
-                is_public: true,
+                visibility: Visibility::Public,
                 acquires_global_resources: vec![],
                 code: Some(CodeUnit {
                     locals: SignatureIndex(0),
@@ -109,7 +110,7 @@ fn no_verify_locals_good() {
             },
             FunctionDefinition {
                 function: FunctionHandleIndex(1),
-                is_public: true,
+                visibility: Visibility::Public,
                 acquires_global_resources: vec![],
                 code: Some(CodeUnit {
                     locals: SignatureIndex(1),

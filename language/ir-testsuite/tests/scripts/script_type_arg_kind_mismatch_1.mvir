@@ -1,5 +1,0 @@
-//! type-args: 0x1::LibraAccount::LibraAccount
-main<T: copyable>() {
-    return;
-}
-// check: CONSTRAINT_KIND_MISMATCH

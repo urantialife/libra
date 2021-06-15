@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (c) The Libra Core Contributors
+# Copyright (c) The Diem Core Contributors
 # SPDX-License-Identifier: Apache-2.0
 # build-aws-base.sh is a common script shared by mutiple build-aws.sh scripts
 
@@ -23,31 +23,31 @@ BUILD_PROJECTS=()
 
 while [[ "$1" =~ ^- ]]; do case $1 in
   --build-all )
-    BUILD_PROJECTS=(libra-validator libra-cluster-test libra-init libra-mint libra-safety-rules libra-tools)
+    BUILD_PROJECTS=(diem-validator diem-cluster-test diem-init diem-faucet diem-safety-rules diem-tools)
     ;;
     # NOTE: This is used in land-blocking workflow `.github/workflows/land-blocking.yml`
     #       If you change the list of projects to be built for `--build-all-cti`, please
     #       change the list in `.github/actions/land-blocking/find-lbt-images.sh` as well
   --build-all-cti )
-    BUILD_PROJECTS=(libra-validator libra-cluster-test libra-init libra-safety-rules)
+    BUILD_PROJECTS=(diem-validator diem-cluster-test diem-init diem-safety-rules)
     ;;
   --build-cluster-test )
-    BUILD_PROJECTS=(libra-cluster-test)
+    BUILD_PROJECTS=(diem-cluster-test)
     ;;
   --build-validator )
-    BUILD_PROJECTS=(libra-validator)
+    BUILD_PROJECTS=(diem-validator)
     ;;
   --build-init )
-    BUILD_PROJECTS=(libra-init)
+    BUILD_PROJECTS=(diem-init)
     ;;
-  --build-mint )
-    BUILD_PROJECTS=(libra-mint)
+  --build-faucet )
+      BUILD_PROJECTS=(diem-faucet)
     ;;
   --build-safety-rules )
-    BUILD_PROJECTS=(libra-safety-rules)
+    BUILD_PROJECTS=(diem-safety-rules)
     ;;
   --build-tools )
-    BUILD_PROJECTS=(libra-tools)
+    BUILD_PROJECTS=(diem-tools)
     ;;
   --version )
     shift;
@@ -124,7 +124,12 @@ while true; do
     for (( i=0; i < ${#BUILD_PROJECTS[@]}; i++ ));
     do
         get_build_status ${BUILD_IDS[$i]}
-        if [[ ${DOWNLOAD_SOURCE_STATUS} == "FAILED" ]] || [[ $BUILD_STATUS == "TIMED_OUT" ]]; then
+        if [[ ${DOWNLOAD_SOURCE_STATUS} == "FAILED" ]]; then
+          echo "${BUILD_PROJECTS[$i]} download source failed"
+          exit ${NON_RETRY_EXIT_CODE}
+        fi
+        if [[ $BUILD_STATUS == "TIMED_OUT" ]]; then
+          echo "${BUILD_PROJECTS[$i]} build timed out"
           exit ${RETRYABLE_EXIT_CODE}
         fi
         if [[ $? -gt 0 ]] || [[ ${BUILD_STATUS} == "" ]]; then

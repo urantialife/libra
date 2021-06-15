@@ -1,12 +1,8 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
-use anyhow::{format_err, Error, Result};
-use serde::{de::Visitor, export::fmt::Debug, Deserialize, Deserializer, Serialize};
-use std::{
-    convert::TryFrom,
-    fmt::{Display, Formatter},
-    str::FromStr,
-};
+use anyhow::{ensure, format_err, Error, Result};
+use serde::{de::Visitor, Deserialize, Deserializer, Serialize};
+use std::{convert::TryFrom, fmt, str::FromStr};
 
 /// A registry of named chain IDs
 /// Its main purpose is to improve human readability of reserved chain IDs in config files and CLI
@@ -17,23 +13,25 @@ use std::{
 pub enum NamedChain {
     /// Users might accidentally initialize the ChainId field to 0, hence reserving ChainId 0 for accidental
     /// initialization.
-    /// MAINNET is the Libra mainnet production chain and is reserved for 1
+    /// MAINNET is the Diem mainnet production chain and is reserved for 1
     MAINNET = 1,
     // Even though these CHAIN IDs do not correspond to MAINNET, changing them should be avoided since they
     // can break test environments for various organisations.
     TESTNET = 2,
     DEVNET = 3,
     TESTING = 4,
+    PREMAINNET = 5,
 }
 
 impl NamedChain {
     fn str_to_chain_id(s: &str) -> Result<ChainId> {
-        // TODO implement custom macro that derives FromStr impl for enum (similar to libra/common/num-variants)
+        // TODO implement custom macro that derives FromStr impl for enum (similar to diem/common/num-variants)
         let reserved_chain = match s {
             "MAINNET" => NamedChain::MAINNET,
             "TESTNET" => NamedChain::TESTNET,
             "DEVNET" => NamedChain::DEVNET,
             "TESTING" => NamedChain::TESTING,
+            "PREMAINNET" => NamedChain::PREMAINNET,
             _ => {
                 return Err(format_err!("Not a reserved chain: {:?}", s));
             }
@@ -45,12 +43,13 @@ impl NamedChain {
         *self as u8
     }
 
-    fn from_chain_id(chain_id: &ChainId) -> Result<NamedChain, String> {
+    pub fn from_chain_id(chain_id: &ChainId) -> Result<NamedChain, String> {
         match chain_id.id() {
             1 => Ok(NamedChain::MAINNET),
             2 => Ok(NamedChain::TESTNET),
             3 => Ok(NamedChain::DEVNET),
             4 => Ok(NamedChain::TESTING),
+            5 => Ok(NamedChain::PREMAINNET),
             _ => Err(String::from("Not a named chain")),
         }
     }
@@ -72,8 +71,8 @@ where
     impl<'de> Visitor<'de> for ChainIdVisitor {
         type Value = ChainId;
 
-        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("ChainId as string or u8")
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("ChainId as string or u8")
         }
 
         fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
@@ -96,14 +95,14 @@ where
     deserializer.deserialize_any(ChainIdVisitor)
 }
 
-impl Debug for ChainId {
-    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+impl fmt::Debug for ChainId {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self)
     }
 }
 
-impl Display for ChainId {
-    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+impl fmt::Display for ChainId {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
             "{}",
@@ -113,8 +112,8 @@ impl Display for ChainId {
     }
 }
 
-impl Display for NamedChain {
-    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+impl fmt::Display for NamedChain {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
             "{}",
@@ -123,6 +122,7 @@ impl Display for NamedChain {
                 NamedChain::TESTNET => "TESTNET",
                 NamedChain::MAINNET => "MAINNET",
                 NamedChain::TESTING => "TESTING",
+                NamedChain::PREMAINNET => "PREMAINNET",
             }
         )
     }
@@ -138,8 +138,12 @@ impl FromStr for ChainId {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        assert!(!s.is_empty());
-        NamedChain::str_to_chain_id(s).or_else(|_err| Ok(ChainId::new(s.parse::<u8>()?)))
+        ensure!(!s.is_empty(), "Cannot create chain ID from empty string");
+        NamedChain::str_to_chain_id(s).or_else(|_err| {
+            let value = s.parse::<u8>()?;
+            ensure!(value > 0, "cannot have chain ID with 0");
+            Ok(ChainId::new(value))
+        })
     }
 }
 
@@ -155,5 +159,20 @@ impl ChainId {
 
     pub fn test() -> Self {
         ChainId::new(NamedChain::TESTING.id())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_chain_id_from_str() {
+        assert!(ChainId::from_str("").is_err());
+        assert!(ChainId::from_str("0").is_err());
+        assert!(ChainId::from_str("256").is_err());
+        assert!(ChainId::from_str("255255").is_err());
+        assert_eq!(ChainId::from_str("TESTING").unwrap(), ChainId::test());
+        assert_eq!(ChainId::from_str("255").unwrap(), ChainId::new(255));
     }
 }

@@ -1,0 +1,3 @@
+publish src/modules
+
+run src/scripts/print_values.move --dry-run

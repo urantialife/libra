@@ -1,18 +1,22 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
     persistent_safety_storage::PersistentSafetyStorage,
     serializer::{SafetyRulesInput, SerializerClient, SerializerService, TSerializerClient},
-    Error, SafetyRules,
+    Error, SafetyRules, TSafetyRules,
 };
-use libra_logger::warn;
-use libra_secure_net::{NetworkClient, NetworkServer};
+use diem_logger::warn;
+use diem_secure_net::{NetworkClient, NetworkServer};
 use std::net::SocketAddr;
 
 pub trait RemoteService {
     fn client(&self) -> SerializerClient {
-        let network_client = NetworkClient::new(self.server_address(), self.network_timeout_ms());
+        let network_client = NetworkClient::new(
+            "safety-rules",
+            self.server_address(),
+            self.network_timeout_ms(),
+        );
         let service = Box::new(RemoteClient::new(network_client));
         SerializerClient::new_client(service)
     }
@@ -27,15 +31,24 @@ pub fn execute(
     storage: PersistentSafetyStorage,
     listen_addr: SocketAddr,
     verify_vote_proposal_signature: bool,
+    export_consensus_key: bool,
     network_timeout_ms: u64,
 ) {
-    let safety_rules = SafetyRules::new(storage, verify_vote_proposal_signature);
+    let mut safety_rules = SafetyRules::new(
+        storage,
+        verify_vote_proposal_signature,
+        export_consensus_key,
+    );
+    if let Err(e) = safety_rules.consensus_state() {
+        warn!("Unable to print consensus state: {}", e);
+    }
+
     let mut serializer_service = SerializerService::new(safety_rules);
-    let mut network_server = NetworkServer::new(listen_addr, network_timeout_ms);
+    let mut network_server = NetworkServer::new("safety-rules", listen_addr, network_timeout_ms);
 
     loop {
         if let Err(e) = process_one_message(&mut network_server, &mut serializer_service) {
-            warn!("Warning: Failed to process message: {}", e);
+            warn!("Failed to process message: {}", e);
         }
     }
 }
@@ -67,7 +80,7 @@ impl RemoteClient {
 
 impl TSerializerClient for RemoteClient {
     fn request(&mut self, input: SafetyRulesInput) -> Result<Vec<u8>, Error> {
-        let input_message = lcs::to_bytes(&input)?;
+        let input_message = bcs::to_bytes(&input)?;
         loop {
             match self.process_one_message(&input_message) {
                 Err(err) => warn!("Failed to communicate with SafetyRules service: {}", err),

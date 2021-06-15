@@ -14,7 +14,7 @@ consensus:
       server_address: "/ip4/{safety_rules_addr}/tcp/6185"
 
 execution:
-  genesis_file_location: "genesis.blob"
+  genesis_file_location: "/opt/diem/etc/genesis.blob"
   backend:
     type: "vault"
     server: "http://{vault_addr}:8200"
@@ -51,6 +51,9 @@ metrics:
 storage:
   prune_window: 50000
 
+json_rpc:
+    address: 0.0.0.0:8080
+
 # this is only enabled when the binary is compiled with failpoints feature, otherwise no-op
 failpoints:
   consensus::process_proposal_msg: 5%return
@@ -60,3 +63,11 @@ failpoints:
   consensus::sync_to: 1%return
   consensus::compute: 1%return
   consensus::pull_txn: 1%return
+  executor::vm_execute_chunk: 1%return
+  executor::commit_chunk: 1%return
+  executor::vm_execute_block: 1%return
+  #executor::commit_blocks: 0.01%return
+  state_sync::request_sync: 1%return
+  state_sync::apply_chunk: 1%return
+  state_sync::process_chunk_request: 0.1%return
+  mempool::send_to: 1%return

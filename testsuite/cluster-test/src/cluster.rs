@@ -1,18 +1,17 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
 
 use crate::instance::{Instance, ValidatorGroup};
-use config_builder::ValidatorConfig;
-use libra_crypto::{
+use diem_crypto::{
     ed25519::{Ed25519PrivateKey, Ed25519PublicKey},
     test_utils::KeyPair,
+    Uniform,
 };
-use libra_types::{chain_id::ChainId, waypoint::Waypoint};
+use diem_types::{chain_id::ChainId, waypoint::Waypoint};
 use rand::prelude::*;
 use reqwest::Client;
-use std::convert::TryInto;
 
 #[derive(Clone)]
 pub struct Cluster {
@@ -26,11 +25,16 @@ pub struct Cluster {
     pub chain_id: ChainId,
 }
 
+pub fn dummy_key_pair() -> KeyPair<Ed25519PrivateKey, Ed25519PublicKey> {
+    Ed25519PrivateKey::generate_for_testing().into()
+}
+
 impl Cluster {
     pub fn from_host_port(
         peers: Vec<(String, u32, Option<u32>)>,
         mint_file: &str,
         chain_id: ChainId,
+        vasp: bool,
     ) -> Self {
         let http_client = Client::new();
         let instances: Vec<Instance> = peers
@@ -45,8 +49,12 @@ impl Cluster {
                 )
             })
             .collect();
-        let mint_key: Ed25519PrivateKey = generate_key::load_key(mint_file);
-        let mint_key_pair = KeyPair::from(mint_key);
+
+        let mint_key_pair = if vasp {
+            dummy_key_pair()
+        } else {
+            KeyPair::from(generate_key::load_key(mint_file))
+        };
         Self {
             validator_instances: instances,
             fullnode_instances: vec![],
@@ -56,16 +64,6 @@ impl Cluster {
             waypoint: None,
             chain_id,
         }
-    }
-
-    fn get_mint_key_pair() -> KeyPair<Ed25519PrivateKey, Ed25519PublicKey> {
-        let seed = "1337133713371337133713371337133713371337133713371337133713371337";
-        let seed = hex::decode(seed).expect("Invalid hex in seed.");
-        let seed = seed[..32].try_into().expect("Invalid seed");
-        let mut validator_config = ValidatorConfig::new();
-        validator_config.seed = seed;
-        let (mint_key, _) = validator_config.build_libra_root_key();
-        KeyPair::from(mint_key)
     }
 
     fn get_mint_key_pair_from_file(
@@ -82,17 +80,12 @@ impl Cluster {
         vault_instances: Vec<Instance>,
         waypoint: Option<Waypoint>,
     ) -> Self {
-        let mint_key_pair = if waypoint.is_some() {
-            Self::get_mint_key_pair_from_file("/tmp/mint.key")
-        } else {
-            Self::get_mint_key_pair()
-        };
         Self {
             validator_instances,
             fullnode_instances,
             lsr_instances,
             vault_instances,
-            mint_key_pair,
+            mint_key_pair: Self::get_mint_key_pair_from_file("/tmp/mint.key"),
             waypoint,
             chain_id: ChainId::test(),
         }
@@ -181,7 +174,7 @@ impl Cluster {
         let mut sub = vec![];
         let mut rem = self.validator_instances.clone();
         for _ in 0..c {
-            let idx_remove = rng.gen_range(0, rem.len());
+            let idx_remove = rng.gen_range(0..rem.len());
             let instance = rem.remove(idx_remove);
             sub.push(instance);
         }
@@ -197,7 +190,7 @@ impl Cluster {
         let mut sub = vec![];
         let mut rem = self.fullnode_instances.clone();
         for _ in 0..c {
-            let idx_remove = rng.gen_range(0, rem.len());
+            let idx_remove = rng.gen_range(0..rem.len());
             let instance = rem.remove(idx_remove);
             sub.push(instance);
         }

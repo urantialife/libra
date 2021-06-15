@@ -1,9 +1,8 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::account_address::AccountAddress;
 use hex::FromHex;
-use libra_crypto::{hash::CryptoHash, HashValue};
 use proptest::prelude::*;
 use std::{
     convert::{AsRef, TryFrom},
@@ -54,15 +53,6 @@ fn test_address() {
         )
     });
 
-    let hash_vec =
-        &Vec::from_hex("c44c0a209ec51c8077b0007334988e11867842e152e05316f062a589ed6b606d")
-            .expect("You must provide a valid Hex format");
-
-    let mut hash = [0u8; 32];
-    let bytes = &hash_vec[..32];
-    hash.copy_from_slice(&bytes);
-
-    assert_eq!(address.hash(), HashValue::new(hash));
     assert_eq!(address.as_ref().to_vec(), hex);
 }
 

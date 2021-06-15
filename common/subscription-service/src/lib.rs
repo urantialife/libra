@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
@@ -7,16 +7,17 @@
 
 use anyhow::Result;
 use channel::{
-    libra_channel::{self, Receiver, Sender},
+    diem_channel::{self, Receiver, Sender},
     message_queues::QueueStyle,
 };
-use libra_types::{
+use diem_types::{
     event::EventKey,
     on_chain_config::{ConfigID, OnChainConfigPayload},
 };
-use std::{collections::HashSet, num::NonZeroUsize};
+use std::collections::HashSet;
 
 pub struct SubscriptionService<T, U> {
+    pub name: String,
     subscribed_items: T,
     sender: Sender<(), U>,
 }
@@ -24,11 +25,11 @@ pub struct SubscriptionService<T, U> {
 impl<T: Clone, U> SubscriptionService<T, U> {
     /// Constructs an subscription object for `items`
     /// Returns the subscription object, and the receiving end of a channel that subscription will be sent to
-    pub fn subscribe(items: T) -> (Self, Receiver<(), U>) {
-        let (sender, receiver) =
-            libra_channel::new(QueueStyle::LIFO, NonZeroUsize::new(1).unwrap(), None);
+    pub fn subscribe(name: &str, items: T) -> (Self, Receiver<(), U>) {
+        let (sender, receiver) = diem_channel::new(QueueStyle::LIFO, 1, None);
         (
             Self {
+                name: name.to_string(),
                 sender,
                 subscribed_items: items,
             },
@@ -66,11 +67,15 @@ impl SubscriptionBundle {
 }
 
 impl ReconfigSubscription {
+    // Creates a subscription service named `name` that subscribes to changes in configs specified in `configs`
+    // and emission of events specified in `events`
+    // Returns (subscription service, endpoint that listens to the service)
     pub fn subscribe_all(
+        name: &str,
         configs: Vec<ConfigID>,
         events: Vec<EventKey>,
     ) -> (Self, Receiver<(), OnChainConfigPayload>) {
         let bundle = SubscriptionBundle::new(configs, events);
-        Self::subscribe(bundle)
+        Self::subscribe(name, bundle)
     }
 }

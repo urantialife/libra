@@ -1,30 +1,52 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
     data_cache::{RemoteCache, TransactionDataCache},
     interpreter::Interpreter,
     loader::Loader,
+    logging::LogContext,
     session::Session,
 };
-use libra_logger::prelude::*;
+use diem_logger::prelude::*;
 use move_core_types::{
     account_address::AccountAddress,
     identifier::IdentStr,
     language_storage::{ModuleId, TypeTag},
+    value::{MoveTypeLayout, MoveValue},
     vm_status::StatusCode,
 };
-use move_vm_types::{data_store::DataStore, gas_schedule::CostStrategy, values::Value};
+use move_vm_types::{
+    data_store::DataStore, gas_schedule::CostStrategy, loaded_data::runtime_types::Type,
+    values::Value,
+};
 use vm::{
     access::ModuleAccess,
+    compatibility::Compatibility,
     errors::{verification_error, Location, PartialVMError, PartialVMResult, VMResult},
-    file_format::SignatureToken,
-    CompiledModule, IndexKind,
+    normalized, CompiledModule, IndexKind,
 };
 
 /// An instantiation of the MoveVM.
 pub(crate) struct VMRuntime {
     loader: Loader,
+}
+
+// signer helper closure
+fn is_signer_reference(s: &Type) -> bool {
+    match s {
+        Type::Reference(ty) => matches!(&**ty, Type::Signer),
+        _ => false,
+    }
+}
+
+fn number_of_signer_ref_params(tys: &[Type]) -> usize {
+    for (i, ty) in tys.iter().enumerate() {
+        if !is_signer_reference(ty) {
+            return i;
+        }
+    }
+    tys.len()
 }
 
 impl VMRuntime {
@@ -41,19 +63,21 @@ impl VMRuntime {
         }
     }
 
+    // See Session::publish_module for what contracts to follow.
     pub(crate) fn publish_module(
         &self,
         module: Vec<u8>,
         sender: AccountAddress,
         data_store: &mut impl DataStore,
         _cost_strategy: &mut CostStrategy,
+        log_context: &impl LogContext,
     ) -> VMResult<()> {
         // deserialize the module. Perform bounds check. After this indexes can be
         // used with the `[]` operator
         let compiled_module = match CompiledModule::deserialize(&module) {
             Ok(module) => module,
             Err(err) => {
-                warn!("[VM] module deserialization failed {:?}", err);
+                warn!(*log_context, "[VM] module deserialization failed {:?}", err);
                 return Err(err.finish(Location::Undefined));
             }
         };
@@ -70,111 +94,310 @@ impl VMRuntime {
             .finish(Location::Undefined));
         }
 
-        // Make sure that there is not already a module with this name published
-        // under the transaction sender's account.
         let module_id = compiled_module.self_id();
+
+        // For now, we assume that all modules can be republished, as long as the new module is
+        // backward compatible with the old module.
+        //
+        // TODO: in the future, we may want to add restrictions on module republishing, possibly by
+        // changing the bytecode format to include an `is_upgradable` flag in the CompiledModule.
         if data_store.exists_module(&module_id)? {
-            return Err(
-                PartialVMError::new(StatusCode::DUPLICATE_MODULE_NAME).finish(Location::Undefined)
-            );
-        };
+            let old_module_ref =
+                self.loader
+                    .load_module_expect_not_missing(&module_id, data_store, log_context)?;
+            let old_module = old_module_ref.module();
+            let old_m = normalized::Module::new(old_module);
+            let new_m = normalized::Module::new(&compiled_module);
+            let compat = Compatibility::check(&old_m, &new_m);
+            if !compat.is_fully_compatible() {
+                return Err(
+                    PartialVMError::new(StatusCode::BACKWARD_INCOMPATIBLE_MODULE_UPDATE)
+                        .finish(Location::Undefined),
+                );
+            }
+        }
 
         // perform bytecode and loading verification
         self.loader
-            .verify_module_verify_no_missing_dependencies(&compiled_module, data_store)?;
+            .verify_module_for_publication(&compiled_module, data_store, log_context)?;
 
         data_store.publish_module(&module_id, module)
     }
 
+    fn deserialize_args(&self, tys: &[Type], args: Vec<Vec<u8>>) -> PartialVMResult<Vec<Value>> {
+        if tys.len() != args.len() {
+            return Err(
+                PartialVMError::new(StatusCode::NUMBER_OF_ARGUMENTS_MISMATCH).with_message(
+                    format!(
+                        "argument length mismatch: expected {} got {}",
+                        tys.len(),
+                        args.len()
+                    ),
+                ),
+            );
+        }
+
+        // Deserialize arguments. This operation will fail if the parameter type is not deserializable.
+        //
+        // Special rule: `&signer` can be created from data with the layout of `signer`.
+        let mut vals = vec![];
+        for (ty, arg) in tys.iter().zip(args.into_iter()) {
+            let val = if is_signer_reference(ty) {
+                match MoveValue::simple_deserialize(&arg, &MoveTypeLayout::Signer) {
+                    Ok(MoveValue::Signer(addr)) => {
+                        Value::transaction_argument_signer_reference(addr)
+                    }
+                    Ok(_) | Err(_) => {
+                        warn!("[VM] failed to deserialize argument");
+                        return Err(PartialVMError::new(
+                            StatusCode::FAILED_TO_DESERIALIZE_ARGUMENT,
+                        ));
+                    }
+                }
+            } else {
+                let layout = match self.loader.type_to_type_layout(ty) {
+                    Ok(layout) => layout,
+                    Err(_err) => {
+                        warn!("[VM] failed to get layout from type");
+                        return Err(PartialVMError::new(
+                            StatusCode::INVALID_PARAM_TYPE_FOR_DESERIALIZATION,
+                        ));
+                    }
+                };
+
+                match Value::simple_deserialize(&arg, &layout) {
+                    Some(val) => val,
+                    None => {
+                        warn!("[VM] failed to deserialize argument");
+                        return Err(PartialVMError::new(
+                            StatusCode::FAILED_TO_DESERIALIZE_ARGUMENT,
+                        ));
+                    }
+                }
+            };
+            vals.push(val)
+        }
+
+        Ok(vals)
+    }
+
+    fn create_signers_and_arguments(
+        &self,
+        tys: &[Type],
+        senders: Vec<AccountAddress>,
+        args: Vec<Vec<u8>>,
+    ) -> PartialVMResult<Vec<Value>> {
+        // Build the arguments list and check the arguments are of restricted types.
+        // Signers are built up from left-to-right. Either all signer arguments are used, or no
+        // signer arguments can be be used by a script.
+        let n_signer_params = number_of_signer_ref_params(tys);
+
+        let args = if n_signer_params == 0 {
+            self.deserialize_args(&tys, args)?
+        } else {
+            let n_signers = senders.len();
+            if n_signer_params != n_signers {
+                return Err(
+                    PartialVMError::new(StatusCode::NUMBER_OF_SIGNER_ARGUMENTS_MISMATCH)
+                        .with_message(format!(
+                            "Expected {} signer args got {}",
+                            n_signer_params, n_signers
+                        )),
+                );
+            }
+            let mut vals: Vec<Value> = senders
+                .into_iter()
+                .map(Value::transaction_argument_signer_reference)
+                .collect();
+            vals.extend(self.deserialize_args(&tys[n_signers..], args)?);
+            vals
+        };
+
+        Ok(args)
+    }
+
+    // See Session::execute_script for what contracts to follow.
     pub(crate) fn execute_script(
         &self,
         script: Vec<u8>,
         ty_args: Vec<TypeTag>,
-        mut args: Vec<Value>,
+        args: Vec<Vec<u8>>,
         senders: Vec<AccountAddress>,
         data_store: &mut impl DataStore,
         cost_strategy: &mut CostStrategy,
+        log_context: &impl LogContext,
     ) -> VMResult<()> {
-        // signer helper closure
-        fn is_signer_reference(s: &SignatureToken) -> bool {
-            use SignatureToken as S;
-            match s {
-                S::Reference(inner) => matches!(&**inner, S::Signer),
-                _ => false,
-            }
-        }
-
         // load the script, perform verification
-        let (main, type_params) = self.loader.load_script(&script, &ty_args, data_store)?;
+        let (main, ty_args, params) =
+            self.loader
+                .load_script(&script, &ty_args, data_store, log_context)?;
 
-        // Build the arguments list for the main and check the arguments are of restricted types.
-        // Signers are built up from left-to-right. Either all signer arguments are used, or no
-        // signer arguments can be be used by a script.
-        let parameters = &main.parameters().0;
-        let first_param_is_signer_ref = parameters.get(0).map_or(false, is_signer_reference);
-        if first_param_is_signer_ref {
-            if parameters.len() != args.len() + senders.len() {
-                return Err(PartialVMError::new(StatusCode::TYPE_MISMATCH)
-                    .with_message("Scripts must use all or no signers".to_string())
-                    .finish(Location::Script));
-            }
-            senders.into_iter().for_each(|addr| {
-                args.insert(0, Value::transaction_argument_signer_reference(addr))
-            });
+        let signers_and_args = self
+            .create_signers_and_arguments(&params, senders, args)
+            .map_err(|err| err.finish(Location::Undefined))?;
+        // run the script
+        let return_vals = Interpreter::entrypoint(
+            main,
+            ty_args,
+            signers_and_args,
+            data_store,
+            cost_strategy,
+            &self.loader,
+            log_context,
+        )?;
+
+        if !return_vals.is_empty() {
+            return Err(
+                PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
+                    .with_message(
+                        "scripts cannot have return values -- this should not happen".to_string(),
+                    )
+                    .finish(Location::Undefined),
+            );
         }
 
-        check_args(&args).map_err(|e| e.finish(Location::Script))?;
+        Ok(())
+    }
 
-        // run the script
-        Interpreter::entrypoint(
-            main,
-            type_params,
+    fn execute_function_impl<F>(
+        &self,
+        module: &ModuleId,
+        function_name: &IdentStr,
+        ty_args: Vec<TypeTag>,
+        make_args: F,
+        is_script_execution: bool,
+        data_store: &mut impl DataStore,
+        cost_strategy: &mut CostStrategy,
+        log_context: &impl LogContext,
+    ) -> VMResult<Vec<Vec<u8>>>
+    where
+        F: FnOnce(&VMRuntime, &[Type]) -> PartialVMResult<Vec<Value>>,
+    {
+        let (func, ty_args, params, return_tys) = self.loader.load_function(
+            function_name,
+            module,
+            &ty_args,
+            is_script_execution,
+            data_store,
+            log_context,
+        )?;
+
+        let return_layouts = return_tys
+            .iter()
+            .map(|ty| {
+                self.loader.type_to_type_layout(ty).map_err(|_err| {
+                    PartialVMError::new(StatusCode::INTERNAL_TYPE_ERROR)
+                        .with_message(
+                            "cannot be called with non-serializable return type".to_string(),
+                        )
+                        .finish(Location::Undefined)
+                })
+            })
+            .collect::<VMResult<Vec<_>>>()?;
+
+        let params = params
+            .into_iter()
+            .map(|ty| ty.subst(&ty_args))
+            .collect::<PartialVMResult<Vec<_>>>()
+            .map_err(|err| err.finish(Location::Undefined))?;
+
+        let args = make_args(self, &params).map_err(|err| err.finish(Location::Undefined))?;
+
+        let return_vals = Interpreter::entrypoint(
+            func,
+            ty_args,
             args,
             data_store,
             cost_strategy,
             &self.loader,
-        )
+            log_context,
+        )?;
+
+        if return_layouts.len() != return_vals.len() {
+            return Err(
+                PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
+                    .with_message(format!(
+                        "declared {} return types, but got {} return values",
+                        return_layouts.len(),
+                        return_vals.len()
+                    ))
+                    .finish(Location::Undefined),
+            );
+        }
+
+        let mut serialized_vals = vec![];
+        for (val, layout) in return_vals.into_iter().zip(return_layouts.iter()) {
+            serialized_vals.push(val.simple_serialize(&layout).ok_or_else(|| {
+                PartialVMError::new(StatusCode::INTERNAL_TYPE_ERROR)
+                    .with_message("failed to serialize return values".to_string())
+                    .finish(Location::Undefined)
+            })?)
+        }
+
+        Ok(serialized_vals)
     }
 
+    // See Session::execute_script_function for what contracts to follow.
+    pub(crate) fn execute_script_function(
+        &self,
+        module: &ModuleId,
+        function_name: &IdentStr,
+        ty_args: Vec<TypeTag>,
+        args: Vec<Vec<u8>>,
+        senders: Vec<AccountAddress>,
+        data_store: &mut impl DataStore,
+        cost_strategy: &mut CostStrategy,
+        log_context: &impl LogContext,
+    ) -> VMResult<()> {
+        let return_vals = self.execute_function_impl(
+            module,
+            function_name,
+            ty_args,
+            move |runtime, params| runtime.create_signers_and_arguments(params, senders, args),
+            true,
+            data_store,
+            cost_strategy,
+            log_context,
+        )?;
+
+        // A script function that serves as the entry point of execution cannot have return values,
+        // this is checked dynamically when the function is loaded. Hence, if the execution ever
+        // reaches here, it is an invariant violation
+        if !return_vals.is_empty() {
+            return Err(
+                PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
+                    .with_message(
+                        "script functions that serve as execution entry points cannot have \
+                        return values -- this should not happen"
+                            .to_string(),
+                    )
+                    .finish(Location::Undefined),
+            );
+        }
+
+        Ok(())
+    }
+
+    // See Session::execute_function for what contracts to follow.
     pub(crate) fn execute_function(
         &self,
         module: &ModuleId,
         function_name: &IdentStr,
         ty_args: Vec<TypeTag>,
-        args: Vec<Value>,
+        args: Vec<Vec<u8>>,
         data_store: &mut impl DataStore,
         cost_strategy: &mut CostStrategy,
-    ) -> VMResult<()> {
-        // load the function in the given module, perform verification of the module and
-        // its dependencies if the module was not loaded
-        let (func, type_params) =
-            self.loader
-                .load_function(function_name, module, &ty_args, data_store)?;
-
-        // check the arguments provided are of restricted types
-        check_args(&args).map_err(|e| e.finish(Location::Module(module.clone())))?;
-
-        // run the function
-        Interpreter::entrypoint(
-            func,
-            type_params,
-            args,
+        log_context: &impl LogContext,
+    ) -> VMResult<Vec<Vec<u8>>> {
+        self.execute_function_impl(
+            module,
+            function_name,
+            ty_args,
+            move |runtime, params| runtime.deserialize_args(params, args),
+            false,
             data_store,
             cost_strategy,
-            &self.loader,
+            log_context,
         )
     }
-}
-
-// Check that the transaction arguments are acceptable by the VM.
-// Constants and a reference to a `Signer` are the only arguments allowed.
-// This check is more of a rough filter to remove obvious bad arguments.
-fn check_args(args: &[Value]) -> PartialVMResult<()> {
-    for val in args {
-        if !val.is_constant_or_signer_ref() {
-            return Err(PartialVMError::new(StatusCode::TYPE_MISMATCH)
-                .with_message("VM argument types are restricted".to_string()));
-        }
-    }
-    Ok(())
 }

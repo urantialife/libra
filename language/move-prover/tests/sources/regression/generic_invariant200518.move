@@ -19,7 +19,7 @@ module GenericBug {
     }
 
     // Remove the `Privilege` from the address at `addr`. The sender must
-    // be the libra root account.
+    // be the diem root account.
     public fun remove_privilege<Privilege>(sender: &signer, addr: address)
     acquires PrivilegedCapability {
         assert(Signer::address_of(sender) == root_address(), 1001);
@@ -39,6 +39,8 @@ module GenericBug {
     public fun root_address(): address { 0xA550C18 }
 
     // **************** SPECIFICATIONS ****************
+    spec module {} // switch documentation context back to module level
+
     spec module {
         pragma verify = true;
 

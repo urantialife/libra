@@ -3,6 +3,10 @@ address 0x1 {
 
 module TestMarketCapWithSchemas {
 
+    /*
+    TODO(refactoring): this test is deactivated until we have ported this (or a similar) feature, or decided to
+      drop it in which case the test should be removed.
+
     spec module {
         pragma verify = true;
     }
@@ -23,7 +27,7 @@ module TestMarketCapWithSchemas {
         apply SumOfCoinsModuleInvariant<X1> to public *deposit*<X1> except excepted_*;
     }
 
-    // A resource representing the Libra coin
+    // A resource representing the Diem coin
     resource struct T<X> {
         // The value of the coin. May be zero
         value: u64,
@@ -34,7 +38,7 @@ module TestMarketCapWithSchemas {
     }
 
     resource struct MarketCap<X> {
-        // The sum of the values of all LibraCoin::T resources in the system
+        // The sum of the values of all DiemCoin::T resources in the system
         total_value: u128,
     }
 
@@ -101,6 +105,8 @@ module TestMarketCapWithSchemas {
     spec fun deposit_different_type_params {
         include DepositIncorrect<Token>;
     }
+
+    */
 }
 
 }

@@ -1,12 +1,11 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::Error;
-use libra_crypto::ed25519::Ed25519PublicKey;
-use libra_logger::Schema;
+use diem_crypto::ed25519::Ed25519PublicKey;
+use diem_logger::Schema;
 use serde::Serialize;
 
-// TODO: Fix the leveling of these logs individually. https://github.com/libra/libra/issues/5615
 #[derive(Schema)]
 pub struct LogSchema<'a> {
     name: LogEntry,
@@ -39,13 +38,15 @@ impl<'a> LogSchema<'a> {
 #[serde(rename_all = "snake_case")]
 pub enum LogEntry {
     CheckKeyStatus,
-    Initialized,
     FullKeyRotation,
+    Initialized,
     KeyRotatedInStorage,
-    TransactionSubmission,
-    NoAction,
+    KeyStillFresh,
     Sleep,
+    TransactionResubmission,
+    TransactionSubmitted,
     WaitForReconfiguration,
+    WaitForTransactionExecution,
 }
 
 #[derive(Clone, Copy, Serialize)]

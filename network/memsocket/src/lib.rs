@@ -1,7 +1,8 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use bytes::{buf::BufExt, Buf, Bytes};
+use bytes::{Buf, Bytes};
+use diem_infallible::Mutex;
 use futures::{
     channel::mpsc::{self, UnboundedReceiver, UnboundedSender},
     io::{AsyncRead, AsyncWrite, Error, ErrorKind, Result},
@@ -10,7 +11,7 @@ use futures::{
     task::{Context, Poll},
 };
 use once_cell::sync::Lazy;
-use std::{collections::HashMap, num::NonZeroU16, pin::Pin, sync::Mutex};
+use std::{collections::HashMap, num::NonZeroU16, pin::Pin};
 
 static SWITCHBOARD: Lazy<Mutex<SwitchBoard>> =
     Lazy::new(|| Mutex::new(SwitchBoard(HashMap::default(), 1)));
@@ -61,7 +62,7 @@ pub struct MemoryListener {
 
 impl Drop for MemoryListener {
     fn drop(&mut self) {
-        let mut switchboard = (&*SWITCHBOARD).lock().unwrap();
+        let mut switchboard = (&*SWITCHBOARD).lock();
         // Remove the Sending side of the channel in the switchboard when
         // MemoryListener is dropped
         switchboard.0.remove(&self.port);
@@ -91,7 +92,7 @@ impl MemoryListener {
     ///
     /// [`local_addr`]: #method.local_addr
     pub fn bind(port: u16) -> Result<Self> {
-        let mut switchboard = (&*SWITCHBOARD).lock().unwrap();
+        let mut switchboard = (&*SWITCHBOARD).lock();
 
         // Get the port we should bind to.  If 0 was given, use a random port
         let port = if let Some(port) = NonZeroU16::new(port) {
@@ -104,17 +105,14 @@ impl MemoryListener {
                 let port = NonZeroU16::new(switchboard.1).unwrap_or_else(|| unreachable!());
 
                 // The switchboard is full and all ports are in use
-                if switchboard.0.len() == (std::u16::MAX - 1) as usize {
+                if Some(switchboard.0.len()) == std::u16::MAX.checked_sub(1).map(usize::from) {
                     return Err(ErrorKind::AddrInUse.into());
                 }
 
                 // Instead of overflowing to 0, resume searching at port 1 since port 0 isn't a
                 // valid port to bind to.
-                if switchboard.1 == std::u16::MAX {
-                    switchboard.1 = 1;
-                } else {
-                    switchboard.1 += 1;
-                }
+
+                switchboard.1 = switchboard.1.checked_add(1).unwrap_or(1);
 
                 if !switchboard.0.contains_key(&port) {
                     break port;
@@ -292,15 +290,15 @@ impl MemorySocket {
     /// # Ok(())}
     /// ```
     pub fn connect(port: u16) -> Result<MemorySocket> {
-        let mut switchboard = (&*SWITCHBOARD).lock().unwrap();
+        let mut switchboard = (&*SWITCHBOARD).lock();
 
         // Find port to connect to
-        let port = NonZeroU16::new(port).ok_or_else(|| ErrorKind::AddrNotAvailable)?;
+        let port = NonZeroU16::new(port).ok_or(ErrorKind::AddrNotAvailable)?;
 
         let sender = switchboard
             .0
             .get_mut(&port)
-            .ok_or_else(|| ErrorKind::AddrNotAvailable)?;
+            .ok_or(ErrorKind::AddrNotAvailable)?;
 
         let (socket_a, socket_b) = Self::new_pair();
         // Send the socket to the listener

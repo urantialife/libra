@@ -1,7 +1,7 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-//! Noise is a [protocol framework](https://noiseprotocol.org/) which we use in Libra to
+//! Noise is a [protocol framework](https://noiseprotocol.org/) which we use in Diem to
 //! encrypt and authenticate communications between nodes of the network.
 //!
 //! This file implements a stripped-down version of Noise_IK_25519_AESGCM_SHA256.
@@ -13,10 +13,10 @@
 //! Usage example:
 //!
 //! ```
-//! use libra_crypto::{noise, x25519, traits::*};
+//! use diem_crypto::{noise, x25519, traits::*};
 //! use rand::prelude::*;
 //!
-//! # fn main() -> Result<(), libra_crypto::noise::NoiseError> {
+//! # fn main() -> Result<(), diem_crypto::noise::NoiseError> {
 //! let mut rng = rand::thread_rng();
 //! let initiator_static = x25519::PrivateKey::generate(&mut rng);
 //! let responder_static = x25519::PrivateKey::generate(&mut rng);
@@ -55,19 +55,18 @@
 //! # }
 //! ```
 //!
-
-use std::{
-    convert::TryFrom as _,
-    io::{Cursor, Read as _, Write as _},
-};
+#![allow(clippy::integer_arithmetic)]
 
 use crate::{hash::HashValue, hkdf::Hkdf, traits::Uniform as _, x25519};
-
 use aes_gcm::{
     aead::{generic_array::GenericArray, Aead, AeadInPlace, NewAead, Payload},
     Aes256Gcm,
 };
 use sha2::Digest;
+use std::{
+    convert::TryFrom as _,
+    io::{Cursor, Read as _, Write as _},
+};
 use thiserror::Error;
 
 //
@@ -121,7 +120,7 @@ pub const fn handshake_resp_msg_len(payload_len: usize) -> usize {
 
 /// This implementation relies on the fact that the hash function used has a 256-bit output
 #[rustfmt::skip]
-const _: [(); 0 - !{ const ASSERT: bool = HashValue::LENGTH == 32; ASSERT } as usize] = [];
+const _: [(); 32] = [(); HashValue::LENGTH];
 
 //
 // Errors
@@ -637,10 +636,7 @@ impl NoiseSession {
 
     /// encrypts a message for the other peers (post-handshake)
     /// the function encrypts in place, and returns the authentication tag as result
-    pub fn write_message_in_place<'a>(
-        &mut self,
-        message: &'a mut [u8],
-    ) -> Result<Vec<u8>, NoiseError> {
+    pub fn write_message_in_place(&mut self, message: &mut [u8]) -> Result<Vec<u8>, NoiseError> {
         // checks
         if !self.valid {
             return Err(NoiseError::SessionClosed);

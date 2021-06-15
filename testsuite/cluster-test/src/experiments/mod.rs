@@ -1,16 +1,17 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 #![forbid(unsafe_code)]
 
-mod client_compatibility_test;
 mod compatibility_test;
 mod cpu_flamegraph;
+mod load_test;
 mod packet_loss_random_validators;
 mod performance_benchmark;
 mod performance_benchmark_three_region_simulation;
 mod reboot_cluster;
 mod reboot_random_validators;
+mod reconfiguration_test;
 mod recovery_time;
 mod twin_validator;
 mod versioning_test;
@@ -21,8 +22,8 @@ use std::{
     time::Duration,
 };
 
-pub use client_compatibility_test::{ClientCompatibilityTest, ClientCompatiblityTestParams};
 pub use compatibility_test::{CompatibilityTest, CompatiblityTestParams};
+pub use load_test::LoadTestParams;
 pub use packet_loss_random_validators::{
     PacketLossRandomValidators, PacketLossRandomValidatorsParams,
 };
@@ -32,6 +33,7 @@ pub use performance_benchmark_three_region_simulation::{
 };
 pub use reboot_cluster::{RebootCluster, RebootClusterParams};
 pub use reboot_random_validators::{RebootRandomValidators, RebootRandomValidatorsParams};
+pub use reconfiguration_test::{Reconfiguration, ReconfigurationParams};
 pub use recovery_time::{RecoveryTime, RecoveryTimeParams};
 pub use twin_validator::{TwinValidators, TwinValidatorsParams};
 pub use versioning_test::{ValidatorVersioning, ValidatorVersioningParams};
@@ -151,11 +153,9 @@ pub fn get_experiment(name: &str, args: &[String], cluster: &Cluster) -> Box<dyn
     known_experiments.insert("generate_cpu_flamegraph", f::<CpuFlamegraphParams>());
     known_experiments.insert("versioning_testing", f::<ValidatorVersioningParams>());
     known_experiments.insert("compatibility_test", f::<CompatiblityTestParams>());
-    known_experiments.insert(
-        "client_compatibility_test",
-        f::<ClientCompatiblityTestParams>(),
-    );
     known_experiments.insert("reboot_cluster", f::<RebootClusterParams>());
+    known_experiments.insert("reconfiguration", f::<ReconfigurationParams>());
+    known_experiments.insert("load_test", f::<LoadTestParams>());
 
     let builder = known_experiments.get(name).expect("Experiment not found");
     builder(args, cluster)

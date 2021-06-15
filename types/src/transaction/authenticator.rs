@@ -1,16 +1,16 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::account_address::AccountAddress;
-use anyhow::{Error, Result};
-use libra_crypto::{
+use anyhow::{ensure, Error, Result};
+use diem_crypto::{
     ed25519::{Ed25519PublicKey, Ed25519Signature},
     hash::CryptoHash,
     multi_ed25519::{MultiEd25519PublicKey, MultiEd25519Signature},
     traits::Signature,
     CryptoMaterialError, HashValue, ValidCryptoMaterial, ValidCryptoMaterialStringExt,
 };
-use libra_crypto_derive::{CryptoHasher, DeserializeKey, SerializeKey};
+use diem_crypto_derive::{CryptoHasher, DeserializeKey, SerializeKey};
 #[cfg(any(test, feature = "fuzzing"))]
 use proptest_derive::Arbitrary;
 use rand::{rngs::OsRng, Rng};
@@ -21,9 +21,9 @@ use std::{convert::TryFrom, fmt, str::FromStr};
 /// (1) How to check its signature against a message and public key
 /// (2) How to convert its public key into an `AuthenticationKeyPreimage` structured as
 /// (public_key | signaure_scheme_id).
-/// Each on-chain `LibraAccount` must store an `AuthenticationKey` (computed via a sha3 hash of an
+/// Each on-chain `DiemAccount` must store an `AuthenticationKey` (computed via a sha3 hash of an
 /// `AuthenticationKeyPreimage`).
-/// Each transaction submitted to the Libra blockchain contains a `TransactionAuthenticator`. During
+/// Each transaction submitted to the Diem blockchain contains a `TransactionAuthenticator`. During
 /// transaction execution, the executor will check if the `TransactionAuthenticator`'s signature on
 /// the transaction hash is well-formed (1) and whether the sha3 hash of the
 /// `TransactionAuthenticator`'s `AuthenticationKeyPreimage` matches the `AuthenticationKey` stored
@@ -272,7 +272,10 @@ impl FromStr for AuthenticationKey {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        assert!(!s.is_empty());
+        ensure!(
+            !s.is_empty(),
+            "authentication key string should not be empty.",
+        );
         let bytes_out = ::hex::decode(s)?;
         let key = AuthenticationKey::try_from(bytes_out.as_slice())?;
         Ok(key)
@@ -295,5 +298,16 @@ impl fmt::Display for AuthenticationKey {
     fn fmt(&self, f: &mut fmt::Formatter) -> std::fmt::Result {
         // Forward to the LowerHex impl with a "0x" prepended (the # flag).
         write!(f, "{:#x}", self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::transaction::authenticator::AuthenticationKey;
+    use std::str::FromStr;
+
+    #[test]
+    fn test_from_str_should_not_panic_by_given_empty_string() {
+        assert!(AuthenticationKey::from_str("").is_err());
     }
 }

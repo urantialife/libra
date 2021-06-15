@@ -1,18 +1,18 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use anyhow::{Error, Result};
-use libra_config::config::{
+use anyhow::{format_err, Error, Result};
+use diem_config::config::{
     RoleType, DEFAULT_BATCH_SIZE_LIMIT, DEFAULT_CONTENT_LENGTH_LIMIT, DEFAULT_PAGE_SIZE_LIMIT,
 };
-use libra_crypto::HashValue;
-use libra_mempool::MempoolClientSender;
-use libra_types::{
+use diem_crypto::HashValue;
+use diem_mempool::MempoolClientSender;
+use diem_types::{
     account_address::AccountAddress,
     account_state_blob::{AccountStateBlob, AccountStateWithProof},
     block_info::BlockInfo,
     chain_id::ChainId,
-    contract_event::ContractEvent,
+    contract_event::{ContractEvent, EventWithProof},
     epoch_change::EpochChangeProof,
     event::EventKey,
     ledger_info::{LedgerInfo, LedgerInfoWithSignatures},
@@ -37,7 +37,7 @@ use tokio::runtime::Runtime;
 /// Should only be used for unit-tests
 pub fn test_bootstrap(
     address: SocketAddr,
-    libra_db: Arc<dyn DbReader>,
+    diem_db: Arc<dyn DbReader>,
     mp_sender: MempoolClientSender,
 ) -> Runtime {
     crate::bootstrap(
@@ -45,16 +45,18 @@ pub fn test_bootstrap(
         DEFAULT_BATCH_SIZE_LIMIT,
         DEFAULT_PAGE_SIZE_LIMIT,
         DEFAULT_CONTENT_LENGTH_LIMIT,
-        libra_db,
+        &None,
+        &None,
+        diem_db,
         mp_sender,
         RoleType::Validator,
         ChainId::test(),
     )
 }
 
-/// Lightweight mock of LibraDB
+/// Lightweight mock of DiemDB
 #[derive(Clone)]
-pub struct MockLibraDB {
+pub struct MockDiemDB {
     pub version: u64,
     pub genesis: HashMap<AccountAddress, AccountStateBlob>,
     pub all_accounts: HashMap<AccountAddress, AccountStateBlob>,
@@ -64,7 +66,7 @@ pub struct MockLibraDB {
     pub timestamps: Vec<u64>,
 }
 
-impl DbReader for MockLibraDB {
+impl DbReader for MockDiemDB {
     fn get_latest_account_state(
         &self,
         address: AccountAddress,
@@ -211,6 +213,17 @@ impl DbReader for MockLibraDB {
         Ok(events)
     }
 
+    fn get_events_with_proofs(
+        &self,
+        _key: &EventKey,
+        _start: u64,
+        _order: Order,
+        _limit: u64,
+        _known_version: Option<u64>,
+    ) -> Result<Vec<EventWithProof>> {
+        unimplemented!()
+    }
+
     fn get_state_proof(
         &self,
         known_version: u64,
@@ -245,7 +258,11 @@ impl DbReader for MockLibraDB {
         _version: Version,
         _ledger_version: Version,
     ) -> Result<AccountStateWithProof> {
-        Ok(self.account_state_with_proof[0].clone())
+        Ok(self
+            .account_state_with_proof
+            .get(0)
+            .ok_or_else(|| format_err!("could not find account state"))?
+            .clone())
     }
 
     fn get_startup_info(&self) -> Result<Option<StartupInfo>> {
@@ -256,7 +273,10 @@ impl DbReader for MockLibraDB {
         &self,
         address: AccountAddress,
         _version: u64,
-    ) -> Result<(Option<AccountStateBlob>, SparseMerkleProof)> {
+    ) -> Result<(
+        Option<AccountStateBlob>,
+        SparseMerkleProof<AccountStateBlob>,
+    )> {
         Ok((
             self.get_latest_account_state(address)?,
             SparseMerkleProof::new(None, vec![]),
@@ -288,5 +308,9 @@ impl DbReader for MockLibraDB {
             Some(t) => *t,
             None => *self.timestamps.last().unwrap(),
         })
+    }
+
+    fn get_accumulator_root_hash(&self, _version: Version) -> Result<HashValue> {
+        Ok(HashValue::zero())
     }
 }

@@ -1,6 +1,7 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+use fallible::copy_from_slice::copy_slice_to_vec;
 use move_ir_types::location::*;
 use petgraph::{algo::astar as petgraph_astar, graphmap::DiGraphMap};
 use std::{
@@ -13,6 +14,7 @@ use std::{
 pub mod ast_debug;
 pub mod remembering_unique_map;
 pub mod unique_map;
+pub mod unique_set;
 
 //**************************************************************************************************
 // Address
@@ -24,7 +26,7 @@ pub const ADDRESS_LENGTH: usize = 16;
 pub struct Address([u8; ADDRESS_LENGTH]);
 
 impl Address {
-    pub const LIBRA_CORE: Address = Address::new([
+    pub const DIEM_CORE: Address = Address::new([
         0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8,
     ]);
 
@@ -47,9 +49,7 @@ impl Address {
         let len = result.len();
         if len < ADDRESS_LENGTH {
             result.reverse();
-            for _ in len..ADDRESS_LENGTH {
-                result.push(0);
-            }
+            result.resize(ADDRESS_LENGTH, 0);
             result.reverse();
         }
 
@@ -72,19 +72,34 @@ impl AsRef<[u8]> for Address {
 
 impl fmt::Display for Address {
     fn fmt(&self, f: &mut fmt::Formatter) -> std::fmt::Result {
-        write!(f, "0x{:#x}", self)
+        write!(f, "0x{:#X}", self)
     }
 }
 
 impl fmt::Debug for Address {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "0x{:#x}", self)
+        write!(f, "0x{:#X}", self)
     }
 }
 
 impl fmt::LowerHex for Address {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let encoded = hex::encode(&self.0);
+        let dropped = encoded
+            .chars()
+            .skip_while(|c| c == &'0')
+            .collect::<String>();
+        if dropped.is_empty() {
+            write!(f, "0")
+        } else {
+            write!(f, "{}", dropped)
+        }
+    }
+}
+
+impl fmt::UpperHex for Address {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let encoded = hex::encode_upper(&self.0);
         let dropped = encoded
             .chars()
             .skip_while(|c| c == &'0')
@@ -105,7 +120,7 @@ impl TryFrom<&[u8]> for Address {
             Err(format!("The Address {:?} is of invalid length", bytes))
         } else {
             let mut addr = [0u8; ADDRESS_LENGTH];
-            addr.copy_from_slice(bytes);
+            copy_slice_to_vec(bytes, &mut addr).map_err(|e| format!("{}", e))?;
             Ok(Address(addr))
         }
     }
@@ -119,8 +134,8 @@ pub trait TName: Eq + Ord + Clone {
     type Key: Ord + Clone;
     type Loc: Copy;
     fn drop_loc(self) -> (Self::Loc, Self::Key);
-    fn clone_drop_loc(&self) -> (Self::Loc, Self::Key);
     fn add_loc(loc: Self::Loc, key: Self::Key) -> Self;
+    fn borrow(&self) -> (&Self::Loc, &Self::Key);
 }
 
 pub trait Identifier {
@@ -139,12 +154,12 @@ impl TName for Name {
         (self.loc, self.value)
     }
 
-    fn clone_drop_loc(&self) -> (Loc, String) {
-        (self.loc, self.value.clone())
-    }
-
     fn add_loc(loc: Loc, key: String) -> Self {
         sp(loc, key)
+    }
+
+    fn borrow(&self) -> (&Loc, &String) {
+        (&self.loc, &self.value)
     }
 }
 

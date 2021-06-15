@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 //! Integration tests for validator_network.
@@ -14,8 +14,8 @@ fn test_network_builder() {
 
 #[test]
 fn test_direct_send() {
-    ::libra_logger::Logger::init_for_testing();
-    let mut tn = setup_network();
+    ::diem_logger::Logger::init_for_testing();
+    let tn = setup_network();
     let dialer_peer_id = tn.dialer_peer_id;
     let mut dialer_events = tn.dialer_events;
     let mut dialer_sender = tn.dialer_sender;
@@ -31,8 +31,8 @@ fn test_direct_send() {
         dialer_sender
             .send_to(listener_peer_id, msg_clone.clone())
             .unwrap();
-        match listener_events.next().await.unwrap().unwrap() {
-            Event::Message((peer_id, msg)) => {
+        match listener_events.next().await.unwrap() {
+            Event::Message(peer_id, msg) => {
                 assert_eq!(peer_id, dialer_peer_id);
                 assert_eq!(msg, msg_clone);
             }
@@ -45,8 +45,8 @@ fn test_direct_send() {
         listener_sender
             .send_to(dialer_peer_id, msg.clone())
             .unwrap();
-        match dialer_events.next().await.unwrap().unwrap() {
-            Event::Message((peer_id, incoming_msg)) => {
+        match dialer_events.next().await.unwrap() {
+            Event::Message(peer_id, incoming_msg) => {
                 assert_eq!(peer_id, listener_peer_id);
                 assert_eq!(incoming_msg, msg);
             }
@@ -59,8 +59,8 @@ fn test_direct_send() {
 
 #[test]
 fn test_rpc() {
-    ::libra_logger::Logger::init_for_testing();
-    let mut tn = setup_network();
+    ::diem_logger::Logger::init_for_testing();
+    let tn = setup_network();
     let dialer_peer_id = tn.dialer_peer_id;
     let mut dialer_events = tn.dialer_events;
     let mut dialer_sender = tn.dialer_sender;
@@ -75,11 +75,11 @@ fn test_rpc() {
     let f_send =
         dialer_sender.send_rpc(listener_peer_id, msg_clone.clone(), Duration::from_secs(10));
     let f_respond = async move {
-        match listener_events.next().await.unwrap().unwrap() {
-            Event::RpcRequest((peer_id, msg, rs)) => {
+        match listener_events.next().await.unwrap() {
+            Event::RpcRequest(peer_id, msg, rs) => {
                 assert_eq!(peer_id, dialer_peer_id);
                 assert_eq!(msg, msg_clone);
-                rs.send(Ok(lcs::to_bytes(&msg).unwrap().into())).unwrap();
+                rs.send(Ok(bcs::to_bytes(&msg).unwrap().into())).unwrap();
             }
             event => panic!("Unexpected event: {:?}", event),
         }
@@ -93,11 +93,11 @@ fn test_rpc() {
     let f_send =
         listener_sender.send_rpc(dialer_peer_id, msg_clone.clone(), Duration::from_secs(10));
     let f_respond = async move {
-        match dialer_events.next().await.unwrap().unwrap() {
-            Event::RpcRequest((peer_id, msg, rs)) => {
+        match dialer_events.next().await.unwrap() {
+            Event::RpcRequest(peer_id, msg, rs) => {
                 assert_eq!(peer_id, listener_peer_id);
                 assert_eq!(msg, msg_clone);
-                rs.send(Ok(lcs::to_bytes(&msg).unwrap().into())).unwrap();
+                rs.send(Ok(bcs::to_bytes(&msg).unwrap().into())).unwrap();
             }
             event => panic!("Unexpected event: {:?}", event),
         }

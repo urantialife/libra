@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::transaction::Script;
@@ -8,6 +8,7 @@ use std::fmt;
 fn test_code_fmt() {
     let expect_output = r#"Script {
     code: "6d6f7665",
+    ty_args: [],
     args: [],
 }"#;
     let script = Script::new(b"move".to_vec(), vec![], vec![]);

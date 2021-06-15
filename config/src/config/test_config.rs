@@ -1,10 +1,10 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::keys::ConfigKey;
-use libra_crypto::{ed25519::Ed25519PrivateKey, PrivateKey, Uniform};
-use libra_temppath::TempPath;
-use libra_types::{
+use diem_crypto::{ed25519::Ed25519PrivateKey, PrivateKey, Uniform};
+use diem_temppath::TempPath;
+use diem_types::{
     on_chain_config::VMPublishingOption, transaction::authenticator::AuthenticationKey,
 };
 use rand::rngs::StdRng;
@@ -60,9 +60,12 @@ impl TestConfig {
         }
     }
 
-    pub fn new_with_temp_dir() -> Self {
-        let temp_dir = TempPath::new();
-        temp_dir.create_as_dir().expect("error creating tempdir");
+    pub fn new_with_temp_dir(temp_dir: Option<TempPath>) -> Self {
+        let temp_dir = temp_dir.unwrap_or_else(|| {
+            let temp_dir = TempPath::new();
+            temp_dir.create_as_dir().expect("error creating tempdir");
+            temp_dir
+        });
         Self {
             auth_key: None,
             operator_key: None,
@@ -71,6 +74,18 @@ impl TestConfig {
             temp_dir: Some(temp_dir),
             publishing_option: None,
         }
+    }
+
+    pub fn execution_key(&mut self, key: Ed25519PrivateKey) {
+        self.execution_key = Some(ConfigKey::new(key))
+    }
+
+    pub fn operator_key(&mut self, key: Ed25519PrivateKey) {
+        self.operator_key = Some(ConfigKey::new(key))
+    }
+
+    pub fn owner_key(&mut self, key: Ed25519PrivateKey) {
+        self.owner_key = Some(ConfigKey::new(key))
     }
 
     pub fn random_account_key(&mut self, rng: &mut StdRng) {
@@ -100,7 +115,7 @@ mod test {
     #[test]
     fn verify_test_config_equality_using_keys() {
         // Create default test config without keys
-        let mut test_config = TestConfig::new_with_temp_dir();
+        let mut test_config = TestConfig::new_with_temp_dir(None);
         assert_eq!(test_config.operator_key, None);
         assert_eq!(test_config.owner_key, None);
         assert_eq!(test_config.execution_key, None);

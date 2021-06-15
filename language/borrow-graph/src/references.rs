@@ -1,4 +1,4 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
@@ -24,6 +24,11 @@ impl RefID {
     /// Creates a new reference id from the given number
     pub const fn new(x: usize) -> Self {
         RefID(x)
+    }
+
+    /// Returns the number representing this reference id.
+    pub fn number(&self) -> usize {
+        self.0
     }
 }
 

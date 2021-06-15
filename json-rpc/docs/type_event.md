@@ -9,7 +9,7 @@ An event emitted during a transaction
 
 | Name                | Type                     | Description                                                    |
 |---------------------|--------------------------|----------------------------------------------------------------|
-| key                 | string                   | Gobally unique identifier of event stream                      |
+| key                 | string                   | Globally unique identifier of event stream                     |
 | sequence_number     | unsigned int64           | Sequence number of the current event in the given even stream  |
 | transaction_version | unsigned int64           | Version of the transaction that emitted this event             |
 | data                | [EventData](#event-data) | Typed event data object                                        |
@@ -54,13 +54,13 @@ Event data is serialized into one JSON object with a "type" field to indicate it
 | type                | string                   | constant string "mint"            |
 | amount              | [Amount](type_amount.md) | amount mint                       |
 
-#### to_lbr_exchange_rate_update
+#### to_xdx_exchange_rate_update
 
 | Name                     | Type     | Description                                  |
 |--------------------------|----------|----------------------------------------------|
-| type                     | string   | constant string "to_lbr_exchange_rate_update"|
+| type                     | string   | constant string "to_xdx_exchange_rate_update"|
 | currency_code            | string   | currency code of the exchange rate updated   |
-| new_to_lbr_exchange_rate | float32  | currency code of the exchange rate updated   |
+| new_to_xdx_exchange_rate | float32  | currency code of the exchange rate updated   |
 
 #### receivedpayment
 
@@ -104,14 +104,14 @@ Event emitted when the url used for off-chain dual attestation checking is rotat
 | new_base_url                | string | New URL endpoint for off-chain communication            |
 | time_rotated_seconds        | u64    | Blockchain time (in seconds) when the rotation occurred |
 
-#### upgrade
+#### admintransaction
 
 Event emitted when a WriteSet transaction is committed which causes the state to be updated.
 
-| Name      | Type   | Description                 |
-|-----------|--------|-----------------------------|
-| type      | string | Constant string "upgrade"   |
-| write_set | string | lcs serialized writeset     |
+| Name                   | Type   | Description                                         |
+|------------------------|--------|-----------------------------------------------------|
+| type                   | string | Constant string "admintransaction"                  |
+| committed_timestamp_secs | u64    | The block time when this transaction is committed   |
 
 #### newepoch
 
@@ -131,7 +131,7 @@ Event emitted when a new block is created
 |---------------|------------------------------|---------------------------------------|
 | type          | string                       | Constant string "newblock"            |
 | round         | unsigned int64               | Round number                          |
-| proposer      | unsigned int64               | proposer account address, hex-encoded |
+| proposer      | string                       | proposer account address, hex-encoded |
 | proposed_time | unsigned int64(microseconds) | proposed timestamp                    |
 
 #### receivedmint
@@ -144,6 +144,16 @@ Event emitted after minted, destination address received the minted coins.
 | amount              | [Amount](type_amount.md) | The amount minted                 |
 | destination_address | string                   | The address who received the mint |
 
+#### createaccount
+
+Event emitted when a new account is created
+
+| Name            | Type   | Description                    |
+|-----------------|--------|--------------------------------|
+| type            | string | Constant string "createaccount"|
+| created_address | string | Address of the created account |
+| role_id         | u64    | Role id of the created account, see [DIP-2](https://dip.diem.com/dip-2/#move-implementation) for more details |
+
 #### unknown
 
 Represents events currently unsupported by JSON-RPC API.
@@ -152,4 +162,4 @@ Represents events currently unsupported by JSON-RPC API.
 |---------|--------|-----------------------------|
 | type    | string | Constant string "unknown"   |
 
-[1]: https://libra.github.io/libra/libra_canonical_serialization/index.html "LCS"
+[1]: https://docs.rs/bcs/ "BCS"

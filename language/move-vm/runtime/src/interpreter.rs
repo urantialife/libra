@@ -1,12 +1,14 @@
-// Copyright (c) The Libra Core Contributors
+// Copyright (c) The Diem Core Contributors
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
     loader::{Function, Loader, Resolver},
+    logging::LogContext,
     native_functions::FunctionContext,
     trace,
 };
-use libra_logger::prelude::*;
+use diem_logger::prelude::*;
+use fail::fail_point;
 use move_core_types::{
     account_address::AccountAddress,
     gas_schedule::{AbstractMemorySize, GasAlgebra, GasCarrier},
@@ -20,10 +22,10 @@ use move_vm_types::{
         self, GlobalValue, IntegerValue, Locals, Reference, Struct, StructRef, VMValueCast, Value,
     },
 };
-use std::{cmp::min, collections::VecDeque, fmt::Write, sync::Arc};
+use std::{cmp::min, collections::VecDeque, fmt::Write, mem, sync::Arc};
 use vm::{
     errors::*,
-    file_format::{Bytecode, FunctionHandleIndex, FunctionInstantiationIndex, Signature},
+    file_format::{Bytecode, FunctionHandleIndex, FunctionInstantiationIndex},
     file_format_common::Opcodes,
 };
 
@@ -45,18 +47,27 @@ macro_rules! debug_writeln {
     };
 }
 
+macro_rules! set_err_info {
+    ($frame:ident, $e:expr) => {{
+        $e.at_code_offset($frame.function.index(), $frame.pc)
+            .finish($frame.location())
+    }};
+}
+
 /// `Interpreter` instances can execute Move functions.
 ///
 /// An `Interpreter` instance is a stand alone execution context for a function.
 /// It mimics execution on a single thread, with an call stack and an operand stack.
-pub(crate) struct Interpreter {
+pub(crate) struct Interpreter<L: LogContext> {
     /// Operand stack, where Move `Value`s are stored for stack operations.
     operand_stack: Stack,
     /// The stack of active functions.
     call_stack: CallStack,
+    // Logger to report information to clients
+    log_context: L,
 }
 
-impl Interpreter {
+impl<L: LogContext> Interpreter<L> {
     /// Entrypoint into the interpreter. All external calls need to be routed through this
     /// function.
     pub(crate) fn entrypoint(
@@ -66,19 +77,21 @@ impl Interpreter {
         data_store: &mut impl DataStore,
         cost_strategy: &mut CostStrategy,
         loader: &Loader,
-    ) -> VMResult<()> {
+        log_context: &L,
+    ) -> VMResult<Vec<Value>> {
         // We count the intrinsic cost of the transaction here, since that needs to also cover the
         // setup of the function.
-        let mut interp = Self::new();
+        let mut interp = Self::new(log_context.clone());
         interp.execute(loader, data_store, cost_strategy, function, ty_args, args)
     }
 
     /// Create a new instance of an `Interpreter` in the context of a transaction with a
     /// given module cache and gas schedule.
-    fn new() -> Self {
+    fn new(log_context: L) -> Self {
         Interpreter {
             operand_stack: Stack::new(),
             call_stack: CallStack::new(),
+            log_context,
         }
     }
 
@@ -91,7 +104,7 @@ impl Interpreter {
         function: Arc<Function>,
         ty_args: Vec<Type>,
         args: Vec<Value>,
-    ) -> VMResult<()> {
+    ) -> VMResult<Vec<Value>> {
         // No unwinding of the call stack and value stack need to be done here -- the context will
         // take care of that.
         self.execute_main(loader, data_store, cost_strategy, function, ty_args, args)
@@ -113,8 +126,7 @@ impl Interpreter {
         function: Arc<Function>,
         ty_args: Vec<Type>,
         args: Vec<Value>,
-    ) -> VMResult<()> {
-        verify_args(function.parameters(), &ty_args, &args).map_err(|e| self.set_location(e))?;
+    ) -> VMResult<Vec<Value>> {
         let mut locals = Locals::new(function.local_count());
         for (i, value) in args.into_iter().enumerate() {
             locals
@@ -124,12 +136,6 @@ impl Interpreter {
 
         let mut current_frame = Frame::new(function, ty_args, locals);
         loop {
-            macro_rules! set_err_info {
-                ($frame:ident, $e:expr) => {{
-                    self.set_location($e.at_code_offset($frame.function.index(), $frame.pc))
-                }};
-            }
-
             let resolver = current_frame.resolver(loader);
             let exit_code =
                 current_frame //self
@@ -137,22 +143,16 @@ impl Interpreter {
                     .map_err(|err| self.maybe_core_dump(err, &current_frame))?;
             match exit_code {
                 ExitCode::Return => {
-                    current_frame
-                        .locals
-                        .check_resources_for_return()
-                        .map_err(|e| set_err_info!(current_frame, e))?;
                     if let Some(frame) = self.call_stack.pop() {
                         current_frame = frame;
+                        current_frame.pc += 1; // advance past the Call instruction in the caller
                     } else {
-                        return Ok(());
+                        return Ok(mem::replace(&mut self.operand_stack.0, vec![]));
                     }
                 }
                 ExitCode::Call(fh_idx) => {
                     cost_strategy
-                        .charge_instr_with_size(
-                            Opcodes::CALL,
-                            AbstractMemorySize::new(1 as GasCarrier),
-                        )
+                        .charge_instr_with_size(Opcodes::CALL, AbstractMemorySize::new(1))
                         .map_err(|e| set_err_info!(current_frame, e))?;
                     let func = resolver.function_from_handle(fh_idx);
                     cost_strategy
@@ -163,6 +163,7 @@ impl Interpreter {
                         .map_err(|e| set_err_info!(current_frame, e))?;
                     if func.is_native() {
                         self.call_native(&resolver, data_store, cost_strategy, func, vec![])?;
+                        current_frame.pc += 1; // advance past the Call instruction in the caller
                         continue;
                     }
                     let frame = self
@@ -176,14 +177,12 @@ impl Interpreter {
                     current_frame = frame;
                 }
                 ExitCode::CallGeneric(idx) => {
-                    resolver
-                        .type_params_count(idx)
-                        .and_then(|arity| {
-                            cost_strategy.charge_instr_with_size(
-                                Opcodes::CALL_GENERIC,
-                                AbstractMemorySize::new((arity + 1) as GasCarrier),
-                            )
-                        })
+                    let arity = resolver.type_params_count(idx);
+                    cost_strategy
+                        .charge_instr_with_size(
+                            Opcodes::CALL_GENERIC,
+                            AbstractMemorySize::new((arity + 1) as GasCarrier),
+                        )
                         .map_err(|e| set_err_info!(current_frame, e))?;
                     let ty_args = resolver
                         .instantiate_generic_function(idx, current_frame.ty_args())
@@ -197,6 +196,7 @@ impl Interpreter {
                         .map_err(|e| set_err_info!(current_frame, e))?;
                     if func.is_native() {
                         self.call_native(&resolver, data_store, cost_strategy, func, ty_args)?;
+                        current_frame.pc += 1; // advance past the Call instruction in the caller
                         continue;
                     }
                     let frame = self
@@ -278,10 +278,10 @@ impl Interpreter {
         let native_function = function.get_native()?;
         let result = native_function.dispatch(&mut native_context, ty_args, arguments)?;
         cost_strategy.deduct_gas(result.cost)?;
-        let values = result
+        let return_values = result
             .result
             .map_err(|code| PartialVMError::new(StatusCode::ABORTED).with_sub_status(code))?;
-        for value in values {
+        for value in return_values {
             self.operand_stack.push(value)?;
         }
         Ok(())
@@ -327,15 +327,15 @@ impl Interpreter {
         data_store: &'a mut impl DataStore,
         addr: AccountAddress,
         ty: &Type,
+        log_context: &impl LogContext,
     ) -> PartialVMResult<&'a mut GlobalValue> {
         match data_store.load_resource(addr, ty) {
             Ok(gv) => Ok(gv),
             Err(e) => {
+                log_context.alert();
                 error!(
-                    "[VM] error loading resource at ({}, {:?}): {:?} from data store",
-                    account = addr,
-                    type = ty,
-                    error = e
+                    *log_context,
+                    "[VM] error loading resource at ({}, {:?}): {:?} from data store", addr, ty, e
                 );
                 Err(e)
             }
@@ -349,7 +349,7 @@ impl Interpreter {
         addr: AccountAddress,
         ty: &Type,
     ) -> PartialVMResult<AbstractMemorySize<GasCarrier>> {
-        let g = Self::load_resource(data_store, addr, ty)?.borrow_global()?;
+        let g = Self::load_resource(data_store, addr, ty, &self.log_context)?.borrow_global()?;
         let size = g.size();
         self.operand_stack.push(g)?;
         Ok(size)
@@ -362,7 +362,7 @@ impl Interpreter {
         addr: AccountAddress,
         ty: &Type,
     ) -> PartialVMResult<AbstractMemorySize<GasCarrier>> {
-        let gv = Self::load_resource(data_store, addr, ty)?;
+        let gv = Self::load_resource(data_store, addr, ty, &self.log_context)?;
         let mem_size = gv.size();
         let exists = gv.exists()?;
         self.operand_stack.push(Value::bool(exists))?;
@@ -376,7 +376,7 @@ impl Interpreter {
         addr: AccountAddress,
         ty: &Type,
     ) -> PartialVMResult<AbstractMemorySize<GasCarrier>> {
-        let resource = Self::load_resource(data_store, addr, ty)?.move_from()?;
+        let resource = Self::load_resource(data_store, addr, ty, &self.log_context)?.move_from()?;
         let size = resource.size();
         self.operand_stack.push(resource)?;
         Ok(size)
@@ -391,7 +391,7 @@ impl Interpreter {
         resource: Value,
     ) -> PartialVMResult<AbstractMemorySize<GasCarrier>> {
         let size = resource.size();
-        Self::load_resource(data_store, addr, ty)?.move_to(resource)?;
+        Self::load_resource(data_store, addr, ty, &self.log_context)?.move_to(resource)?;
         Ok(size)
     }
 
@@ -403,7 +403,11 @@ impl Interpreter {
     fn maybe_core_dump(&self, mut err: VMError, current_frame: &Frame) -> VMError {
         // a verification error cannot happen at runtime so change it into an invariant violation.
         if err.status_type() == StatusType::Verification {
-            error!("Verification error during runtime: {:?}", error = err);
+            self.log_context.alert();
+            error!(
+                self.log_context,
+                "Verification error during runtime: {:?}", err
+            );
             let new_err = PartialVMError::new(StatusCode::VERIFICATION_ERROR);
             let new_err = match err.message() {
                 None => new_err,
@@ -413,10 +417,10 @@ impl Interpreter {
         }
         if err.status_type() == StatusType::InvariantViolation {
             let state = self.get_internal_state(current_frame);
+            self.log_context.alert();
             error!(
-                "Error: {:?}\nCORE DUMP: >>>>>>>>>>>>\n{}\n<<<<<<<<<<<<\n",
-                error = err,
-                state = state,
+                self.log_context,
+                "Error: {:?}\nCORE DUMP: >>>>>>>>>>>>\n{}\n<<<<<<<<<<<<\n", err, state,
             );
         }
         err
@@ -676,7 +680,7 @@ impl Frame {
     fn execute_code(
         &mut self,
         resolver: &Resolver,
-        interpreter: &mut Interpreter,
+        interpreter: &mut Interpreter<impl LogContext>,
         data_store: &mut impl DataStore,
         cost_strategy: &mut CostStrategy,
     ) -> VMResult<ExitCode> {
@@ -690,7 +694,7 @@ impl Frame {
     fn execute_code_impl(
         &mut self,
         resolver: &Resolver,
-        interpreter: &mut Interpreter,
+        interpreter: &mut Interpreter<impl LogContext>,
         data_store: &mut impl DataStore,
         cost_strategy: &mut CostStrategy,
     ) -> PartialVMResult<ExitCode> {
@@ -705,7 +709,14 @@ impl Frame {
                     &resolver,
                     &interpreter
                 );
-                self.pc += 1;
+
+                fail_point!("move_vm::interpreter_loop", |_| {
+                    Err(
+                        PartialVMError::new(StatusCode::VERIFIER_INVARIANT_VIOLATION).with_message(
+                            "Injected move_vm::interpreter verifier failure".to_owned(),
+                        ),
+                    )
+                });
 
                 match instruction {
                     Bytecode::Pop => {
@@ -837,10 +848,9 @@ impl Frame {
                             |acc, v| acc.add(v.size()),
                         );
                         cost_strategy.charge_instr_with_size(Opcodes::PACK, size)?;
-                        let is_resource = resolver.struct_from_definition(*sd_idx).is_resource;
                         interpreter
                             .operand_stack
-                            .push(Value::struct_(Struct::pack(args, is_resource)))?;
+                            .push(Value::struct_(Struct::pack(args)))?;
                     }
                     Bytecode::PackGeneric(si_idx) => {
                         let field_count = resolver.field_instantiation_count(*si_idx);
@@ -850,11 +860,9 @@ impl Frame {
                             |acc, v| acc.add(v.size()),
                         );
                         cost_strategy.charge_instr_with_size(Opcodes::PACK_GENERIC, size)?;
-                        let is_resource =
-                            resolver.instantiation_is_resource(*si_idx, self.ty_args())?;
                         interpreter
                             .operand_stack
-                            .push(Value::struct_(Struct::pack(args, is_resource)))?;
+                            .push(Value::struct_(Struct::pack(args)))?;
                     }
                     Bytecode::Unpack(sd_idx) => {
                         let field_count = resolver.field_count(*sd_idx);
@@ -1103,6 +1111,8 @@ impl Frame {
                         cost_strategy.charge_instr(Opcodes::NOP)?;
                     }
                 }
+                // invariant: advance to pc +1 is iff instruction at pc executed without aborting
+                self.pc += 1;
             }
             // ok we are out, it's a branch, check the pc for good luck
             // TODO: re-work the logic here. Tests should have a more
@@ -1134,26 +1144,4 @@ impl Frame {
             Some(id) => Location::Module(id.clone()),
         }
     }
-}
-
-// Verify the the type of the arguments in input from the outside is restricted (`is_valid_arg()`)
-// and it honors the signature of the function invoked.
-// TODO: we need to check the instantiation, once we expose signatures with generic argument
-fn verify_args(signature: &Signature, _ty_args: &[Type], args: &[Value]) -> PartialVMResult<()> {
-    if signature.len() != args.len() {
-        return Err(
-            PartialVMError::new(StatusCode::TYPE_MISMATCH).with_message(format!(
-                "argument length mismatch: expected {} got {}",
-                signature.len(),
-                args.len()
-            )),
-        );
-    }
-    for (tok, val) in signature.0.iter().zip(args) {
-        if !val.is_valid_arg(tok) {
-            return Err(PartialVMError::new(StatusCode::TYPE_MISMATCH)
-                .with_message(format!("unexpected type: {:?}, arg: {:?}", tok, val)));
-        }
-    }
-    Ok(())
 }
